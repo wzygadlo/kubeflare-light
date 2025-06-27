@@ -1,0 +1,22 @@
+apiVersion: cloudflare.io/v1alpha1
+kind: RateLimit
+metadata:
+  name: api-rate-limit
+  namespace: default
+spec:
+  zoneId: "your-zone-id-here"
+  name: "API Rate Limit"
+  description: "Rate limit for API endpoints to prevent abuse"
+  match:
+    request:
+      methods: ["GET", "POST", "PUT", "DELETE"]
+      schemes: ["https"]
+      urlPattern: "/api/*"
+    response:
+      statusCodes: [200, 201, 202]
+  threshold: 100
+  period: 60
+  action:
+    mode: "challenge"
+    timeout: 86400
+  disabled: false

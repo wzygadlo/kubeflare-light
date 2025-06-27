@@ -1,0 +1,99 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: wafrules.cloudflare.io
+spec:
+  group: cloudflare.io
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required:
+            - zoneId
+            - name
+            - expression
+            - action
+            properties:
+              zoneId:
+                type: string
+                description: Cloudflare zone identifier
+              name:
+                type: string
+                description: Descriptive name for the WAF rule
+              description:
+                type: string
+                description: Additional context for the WAF rule
+              expression:
+                type: string
+                description: Wireshark-like filter expression
+              action:
+                type: string
+                enum: ["allow", "block", "challenge", "js_challenge", "managed_challenge", "log", "skip"]
+                description: Action to take when the rule matches
+              priority:
+                type: integer
+                description: Rule priority (lower numbers are higher priority)
+              paused:
+                type: boolean
+                description: Whether the rule is paused
+              actionParameters:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: Action parameter ID
+                  overrides:
+                    type: object
+                    additionalProperties: true
+                    description: Rule overrides
+                  response:
+                    type: object
+                    properties:
+                      statusCode:
+                        type: integer
+                        description: HTTP status code
+                      contentType:
+                        type: string
+                        description: Content type of the response
+                      content:
+                        type: string
+                        description: Response content
+          status:
+            type: object
+            properties:
+              cloudflareId:
+                type: string
+                description: ID of the WAF rule in Cloudflare
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+              observedGeneration:
+                type: integer
+                format: int64
+                description: Most recently observed generation
+    subresources:
+      status: {}
+  scope: Namespaced
+  names:
+    plural: wafrules
+    singular: wafrule
+    kind: WAFRule

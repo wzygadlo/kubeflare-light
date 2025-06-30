@@ -1,0 +1,16 @@
+{{- if .Values.zones.createConfigMap -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kubeflare-light.zonesConfigMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubeflare-light.labels" . | nindent 4 }}
+data:
+  {{- if .Values.zones.defaultZoneId }}
+  default: {{ .Values.zones.defaultZoneId | quote }}
+  {{- end }}
+  {{- with .Values.zones.mappings }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

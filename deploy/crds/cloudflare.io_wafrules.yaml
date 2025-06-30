@@ -1,33 +1,33 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: wafrules.cloudflare.io
+  name: wafrules.cloudflare.kubeflare.io
 spec:
-  group: cloudflare.io
+  group: cloudflare.kubeflare.io
   versions:
   - name: v1alpha1
     served: true
     storage: true
     additionalPrinterColumns:
     - name: Zone
-                type: string
+      type: string
       jsonPath: .spec.zoneId
     - name: Action
-                type: string
+      type: string
       jsonPath: .spec.action
     - name: Paused
-                type: boolean
+      type: boolean
       jsonPath: .spec.paused
     - name: Status
-                    type: string
+      type: string
       jsonPath: .status.conditions[?(@.type=="Ready")].status
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp
     schema:
       openAPIV3Schema:
-                    type: object
-                    properties:
+        type: object
+        properties:
           spec:
             type: object
             required:
@@ -39,16 +39,16 @@ spec:
                 type: string
                 description: Cloudflare zone identifier
               name:
-                      type: string
+                type: string
                 description: Descriptive name for the WAF rule
               description:
-                      type: string
+                type: string
                 description: Additional context for the WAF rule
               expression:
-                      type: string
+                type: string
                 description: Wireshark-like filter expression
               action:
-                      type: string
+                type: string
                 enum: ["allow", "block", "challenge", "js_challenge", "managed_challenge", "log", "skip"]
                 description: Action to take when the rule matches
               priority:

@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kubeflare-light.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubeflare-light.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kubeflare-light.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "kubeflare-light.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "kubeflare-light.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: manager
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        - --metrics-addr={{ .Values.controller.metricsAddr }}
+        {{- if .Values.controller.leaderElection }}
+        - --enable-leader-election
+        {{- end }}
+        {{- if .Values.controller.healthProbeAddr }}
+        - --health-probe-addr={{ .Values.controller.healthProbeAddr }}
+        {{- end }}
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        {{- if .Values.controller.healthProbeAddr }}
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        {{- end }}
+        env:
+        - name: CLOUDFLARE_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "kubeflare-light.secretName" . }}
+              key: {{ .Values.cloudflare.secretKey }}
+        {{- if .Values.zones.defaultZoneId }}
+        - name: DEFAULT_ZONE_ID
+          value: {{ .Values.zones.defaultZoneId | quote }}
+        {{- end }}
+        - name: ZONES_CONFIGMAP_NAME
+          value: {{ include "kubeflare-light.zonesConfigMapName" . }}
+        - name: ZONES_CONFIGMAP_NAMESPACE
+          value: {{ .Release.Namespace }}
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - name: zones-config
+          mountPath: /etc/kubeflare/zones
+          readOnly: true
+      volumes:
+      - name: zones-config
+        configMap:
+          name: {{ include "kubeflare-light.zonesConfigMapName" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

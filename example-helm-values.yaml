@@ -1,0 +1,26 @@
+# Example values for kubeflare-light Helm chart
+# Copy this file and modify it for your environment
+
+cloudflare:
+  # Your Cloudflare API token
+  apiToken: "your-cloudflare-api-token-here"
+  
+zones:
+  # Your default zone ID
+  defaultZoneId: "4b5c7c7ca06cddfe0fe680cf0b570920"
+  
+  # Optional: Domain to zone ID mappings
+  mappings:
+    example.com: "4b5c7c7ca06cddfe0fe680cf0b570920"
+    # api.example.com: "5c6d8d8db07dedfe0fe680cf0b570930"
+
+# Use local image for Kind testing
+image:
+  repository: kubeflare-light
+  tag: v1
+  pullPolicy: Never
+
+# Development settings
+controller:
+  maxConcurrentReconciles: 1
+  leaderElection: true

@@ -1,0 +1,28 @@
+apiVersion: cloudflare.kubeflare.io/v1alpha1
+kind: RateLimit
+metadata:
+  name: test-api-ratelimit
+  namespace: default
+spec:
+  # Zone ID - can be actual zone ID or domain name (resolved via ConfigMap)
+  zoneId: "example.com"
+  
+  # Description from your API call
+  description: "test"
+  
+  # Match criteria - URL pattern matching your API call
+  match:
+    request:
+      urlPattern: "/test/v1/*"
+  
+  # Rate limit settings matching your API call
+  threshold: 10        # requests_per_period: 10
+  period: 10          # period: 10 seconds
+  
+  # Action when rate limit is exceeded
+  action:
+    mode: "block"     # action: "block"
+    timeout: 10       # mitigation_timeout: 10
+  
+  # Rule is enabled by default
+  disabled: false

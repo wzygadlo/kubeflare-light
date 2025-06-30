@@ -1,8 +1,8 @@
 # Image URL to use all building/pushing image targets
-REGISTRY ?= docker.io/your-username  # Change this to your registry
+REGISTRY ?= 
 IMAGE_NAME ?= kubeflare-light
 TAG ?= latest
-IMG ?= $(REGISTRY)/$(IMAGE_NAME):$(TAG)
+IMG ?= $(IMAGE_NAME):$(TAG)
 NAMESPACE ?= kubeflare-light-system
 CLOUDFLARE_API_TOKEN ?= your-cloudflare-api-token  # Replace with your token or set via environment
 
@@ -52,7 +52,7 @@ run: ## Run a controller from your host.
 
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	docker build -t ${IMG} .
+	docker build -t "$(IMG)" .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

@@ -1,33 +1,33 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: ratelimits.cloudflare.io
+  name: ratelimits.cloudflare.kubeflare.io
 spec:
-  group: cloudflare.io
+  group: cloudflare.kubeflare.io
   versions:
   - name: v1alpha1
     served: true
     storage: true
     additionalPrinterColumns:
     - name: Zone
-                type: string
+      type: string
       jsonPath: .spec.zoneId
     - name: Threshold
-                          type: integer
+      type: integer
       jsonPath: .spec.threshold
     - name: Period
-                type: integer
+      type: integer
       jsonPath: .spec.period
     - name: Status
-                    type: string
+      type: string
       jsonPath: .status.conditions[?(@.type=="Ready")].status
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp
     schema:
       openAPIV3Schema:
-                    type: object
-                    properties:
+        type: object
+        properties:
           spec:
             type: object
             required:
@@ -39,7 +39,7 @@ spec:
                 type: string
                 description: Cloudflare zone identifier
               description:
-                      type: string
+                type: string
                 description: Additional context for the rate limit rule
               match:
                 type: object

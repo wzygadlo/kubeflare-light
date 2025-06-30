@@ -1,0 +1,99 @@
+# Default values for kubeflare-light
+replicaCount: 1
+
+image:
+  repository: kubeflare-light
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Cloudflare configuration
+cloudflare:
+  # API token for Cloudflare authentication
+  # Can be provided via existing secret or created by the chart
+  apiToken: ""
+  # Use existing secret for API token
+  existingSecret: ""
+  secretKey: "token"
+
+# Zone configuration
+zones:
+  # Default zone ID (can be overridden per resource)
+  defaultZoneId: ""
+  # ConfigMap containing zone mappings
+  configMapName: "kubeflare-zones"
+  # Create ConfigMap with zone mappings
+  createConfigMap: true
+  # Zone mappings (domain -> zone ID)
+  mappings:
+    # example.com: "4b5c7c7ca06cddfe0fe680cf0b570920"
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 8080
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Controller configuration
+controller:
+  # Number of concurrent reconcilers
+  maxConcurrentReconciles: 1
+  # Reconcile interval
+  reconcileInterval: 10m
+  # Enable leader election
+  leaderElection: true
+  # Metrics bind address
+  metricsAddr: "0.0.0.0:8080"
+  # Health probe bind address
+  healthProbeAddr: "0.0.0.0:8081"
+
+# RBAC configuration
+rbac:
+  create: true
+
+# Custom Resource Definitions
+crds:
+  # Install CRDs
+  install: true
+  # Keep CRDs on uninstall
+  keep: false

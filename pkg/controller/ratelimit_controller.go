@@ -18,6 +18,7 @@ import (
 
 	cloudflareV1alpha1 "github.com/wzygadlo/kubeflare-light/pkg/apis/cloudflare/v1alpha1"
 	cfclient "github.com/wzygadlo/kubeflare-light/pkg/cloudflare/client"
+	"github.com/wzygadlo/kubeflare-light/pkg/utils"
 )
 
 const rateLimitFinalizer = "cloudflare.io/ratelimit-finalizer"
@@ -25,9 +26,10 @@ const rateLimitFinalizer = "cloudflare.io/ratelimit-finalizer"
 // RateLimitReconciler reconciles a RateLimit object
 type RateLimitReconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
-	CF     *cfclient.CloudflareClient
+	Log          logr.Logger
+	Scheme       *runtime.Scheme
+	CF           *cfclient.CloudflareClient
+	ZoneResolver *utils.ZoneResolver
 }
 
 // +kubebuilder:rbac:groups=cloudflare.kubeflare.io,resources=ratelimits,verbs=get;list;watch;create;update;patch;delete
@@ -46,10 +48,11 @@ func SetupRateLimitController(mgr ctrl.Manager) error {
 		For(&cloudflareV1alpha1.RateLimit{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(&RateLimitReconciler{
-			Client: mgr.GetClient(),
-			Log:    log.Log.WithName("controllers").WithName("RateLimit"),
-			Scheme: mgr.GetScheme(),
-			CF:     cfClient,
+			Client:       mgr.GetClient(),
+			Log:          log.Log.WithName("controllers").WithName("RateLimit"),
+			Scheme:       mgr.GetScheme(),
+			CF:           cfClient,
+			ZoneResolver: utils.NewZoneResolver(mgr.GetClient()),
 		})
 }
 
@@ -104,12 +107,21 @@ func (r *RateLimitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit *cloudflareV1alpha1.RateLimit) (ctrl.Result, error) {
 	log := r.Log.WithValues("ratelimit", rateLimit.Name)
 
+	// Resolve zone ID from ConfigMap if needed
+	zoneID, err := r.ZoneResolver.ResolveZoneID(ctx, rateLimit.Spec.ZoneID)
+	if err != nil {
+		log.Error(err, "Failed to resolve zone ID")
+		r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "ZoneResolutionFailed", err.Error())
+		r.Status().Update(ctx, rateLimit)
+		return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+	}
+
 	// Convert Kubernetes RateLimit to Cloudflare RateLimit
 	cfRateLimit := r.convertToCloudflareRateLimit(rateLimit)
 
 	if rateLimit.Status.CloudflareID == "" {
 		// Create new rate limit in Cloudflare
-		resp, err := r.CF.CreateRateLimit(ctx, rateLimit.Spec.ZoneID, cfRateLimit)
+		resp, err := r.CF.CreateRateLimit(ctx, zoneID, cfRateLimit)
 		if err != nil {
 			log.Error(err, "Failed to create rate limit in Cloudflare")
 			r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "CreateFailed", err.Error())
@@ -125,7 +137,7 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		log.Info("Created rate limit in Cloudflare", "cloudflareId", resp.ID)
 	} else {
 		// Update existing rate limit in Cloudflare
-		_, err := r.CF.UpdateRateLimit(ctx, rateLimit.Spec.ZoneID, rateLimit.Status.CloudflareID, cfRateLimit)
+		_, err := r.CF.UpdateRateLimit(ctx, zoneID, rateLimit.Status.CloudflareID, cfRateLimit)
 		if err != nil {
 			log.Error(err, "Failed to update rate limit in Cloudflare")
 			r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "UpdateFailed", err.Error())
@@ -182,7 +194,7 @@ func (r *RateLimitReconciler) convertToCloudflareRateLimit(rateLimit *cloudflare
 
 		// Add URL pattern if defined
 		if rateLimit.Spec.Match.Request != nil && rateLimit.Spec.Match.Request.URLPattern != "" {
-			expression = fmt.Sprintf("http.request.uri.path matches \"%s\"", rateLimit.Spec.Match.Request.URLPattern)
+			expression = fmt.Sprintf("(http.request.uri.path wildcard \"%s\")", rateLimit.Spec.Match.Request.URLPattern)
 		}
 
 		// Add methods if defined

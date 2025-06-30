@@ -1,0 +1,100 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubeflare-light.fullname" . }}-manager-role
+  labels:
+    {{- include "kubeflare-light.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - ratelimits
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - ratelimits/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - ratelimits/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - wafrules
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - wafrules/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - wafrules/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - list
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kubeflare-light.fullname" . }}-manager-rolebinding
+  labels:
+    {{- include "kubeflare-light.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kubeflare-light.fullname" . }}-manager-role
+subjects:
+- kind: ServiceAccount
+  name: {{ include "kubeflare-light.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -122,7 +122,7 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 			Description: cloudflare.F(rateLimit.Description),
 			Expression:  cloudflare.F(rateLimit.Expression),
 			Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
-				Characteristics:   cloudflare.F([]string{"ip.src"}), // Default to IP-based rate limiting
+				Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}), // Required by Cloudflare API
 				Period:            cloudflare.F(int64(rateLimit.Period)),
 				RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
 				MitigationTimeout: cloudflare.F(int64(rateLimit.Period)), // Block for the same period duration
@@ -221,7 +221,7 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 				Description: cloudflare.F(rateLimit.Description),
 				Expression:  cloudflare.F(rateLimit.Expression),
 				Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
-					Characteristics:   cloudflare.F([]string{"ip.src"}),
+					Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}), // Required by Cloudflare API
 					Period:            cloudflare.F(int64(rateLimit.Period)),
 					RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
 					MitigationTimeout: cloudflare.F(int64(rateLimit.Period)),

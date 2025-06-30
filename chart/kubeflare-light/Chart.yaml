@@ -1,0 +1,17 @@
+apiVersion: v2
+name: kubeflare-light
+description: A Kubernetes controller for managing Cloudflare rate limits and WAF rules
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/wzygadlo/kubeflare-light
+sources:
+  - https://github.com/wzygadlo/kubeflare-light
+maintainers:
+  - name: wzygadlo
+keywords:
+  - cloudflare
+  - rate-limiting
+  - waf
+  - kubernetes
+  - controller

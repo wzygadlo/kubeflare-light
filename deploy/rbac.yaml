@@ -10,7 +10,7 @@ metadata:
   name: kubeflare-light-manager-role
 rules:
 - apiGroups:
-  - cloudflare.io
+  - cloudflare.kubeflare.io
   resources:
   - ratelimits
   verbs:
@@ -22,13 +22,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - cloudflare.io
+  - cloudflare.kubeflare.io
   resources:
   - ratelimits/finalizers
   verbs:
   - update
 - apiGroups:
-  - cloudflare.io
+  - cloudflare.kubeflare.io
   resources:
   - ratelimits/status
   verbs:
@@ -36,7 +36,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - cloudflare.io
+  - cloudflare.kubeflare.io
   resources:
   - wafrules
   verbs:
@@ -48,13 +48,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - cloudflare.io
+  - cloudflare.kubeflare.io
   resources:
   - wafrules/finalizers
   verbs:
   - update
 - apiGroups:
-  - cloudflare.io
+  - cloudflare.kubeflare.io
   resources:
   - wafrules/status
   verbs:

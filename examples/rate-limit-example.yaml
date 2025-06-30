@@ -5,7 +5,6 @@ metadata:
   namespace: default
 spec:
   zoneId: "your-zone-id-here"
-  name: "API Rate Limit"
   description: "Rate limit for API endpoints to prevent abuse"
   match:
     request:
@@ -13,7 +12,7 @@ spec:
       schemes: ["https"]
       urlPattern: "/api/*"
     response:
-      statusCodes: [200, 201, 202]
+      statuses: [200, 201, 202]
   threshold: 100
   period: 60
   action:

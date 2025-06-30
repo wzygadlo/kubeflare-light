@@ -5,7 +5,6 @@ metadata:
   namespace: default
 spec:
   zoneId: "your-zone-id-here"
-  name: "Block Malicious IPs"
   description: "Block known malicious IP addresses and suspicious traffic"
   expression: '(ip.src in {192.0.2.1 192.0.2.2 198.51.100.0/24}) or (cf.threat_score gt 14)'
   action: "block"
@@ -24,7 +23,6 @@ metadata:
   namespace: default
 spec:
   zoneId: "your-zone-id-here"
-  name: "Challenge Suspicious User Agents"
   description: "Challenge requests with suspicious or automated user agents"
   expression: '(http.user_agent contains "bot") or (http.user_agent contains "crawler") or (http.user_agent eq "")'
   action: "managed_challenge"

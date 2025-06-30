@@ -6,146 +6,18 @@ import (
 	"os"
 	"time"
 
-	"github.com/cloudflare/cloudflare-go"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	cloudflareV1alpha1 "github.com/wzygadlo/kubeflare-light/pkg/apis/cloudflare/v1alpha1"
-	"github.com/wzygadlo/kubeflare-light/pkg/cloudflare/client"
-)
-
-// RateLimitReconciler reconciles a RateLimit object
-type RateLimitReconciler struct {
-	client.Client
-	Scheme        *runtime.Scheme
-	CloudflareAPI client.CloudflareClient
-}
-
-// +kubebuilder:rbac:groups=cloudflare.kubeflare.io,resources=ratelimits,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=cloudflare.kubeflare.io,resources=ratelimits/status,verbs=get;update;patch
-
-// Reconcile handles RateLimit resources
-func (r *RateLimitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("Reconciling RateLimit", "namespacedName", req.NamespacedName)
-
-	// Fetch the RateLimit instance
-	rateLimit := &cloudflareV1alpha1.RateLimit{}
-	err := r.Get(ctx, req.NamespacedName, rateLimit)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Request object not found, could have been deleted after reconcile request.
-			return ctrl.Result{}, nil
-		}
-		// Error reading the object - requeue the request.
-		return ctrl.Result{}, err
-	}
-
-	// Check if the resource is being deleted
-	if !rateLimit.ObjectMeta.DeletionTimestamp.IsZero() {
-		// Resource is being deleted, clean up Cloudflare resources
-		if rateLimit.Status.ID != "" {
-			err := r.CloudflareAPI.DeleteRateLimit(ctx, rateLimit.Spec.ZoneID, rateLimit.Status.ID)
-			if err != nil {
-				logger.Error(err, "Failed to delete rate limit from Cloudflare")
-				return ctrl.Result{}, err
-			}
-			logger.Info("Successfully deleted rate limit from Cloudflare")
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// Convert our CRD to Cloudflare API format
-	cfRateLimit, err := convertToCloudflareRateLimit(rateLimit)
-	if err != nil {
-		logger.Error(err, "Failed to convert RateLimit to Cloudflare format")
-		return ctrl.Result{}, err
-	}
-
-	// Check if this is a new resource or an update
-	if rateLimit.Status.ID == "" {
-		// Create new rate limit in Cloudflare
-		resp, err := r.CloudflareAPI.CreateRateLimit(ctx, rateLimit.Spec.ZoneID, cfRateLimit)
-		if err != nil {
-			logger.Error(err, "Failed to create rate limit in Cloudflare")
-			setRateLimitCondition(rateLimit, metav1.ConditionFalse, "CreateFailed", err.Error())
-			if err := r.Status().Update(ctx, rateLimit); err != nil {
-				logger.Error(err, "Failed to update RateLimit status")
-			}
-			return ctrl.Result{}, err
-		}
-
-		// Update status with the Cloudflare ID
-		rateLimit.Status.ID = resp.ID
-		setRateLimitCondition(rateLimit, metav1.ConditionTrue, "Created", "Successfully created in Cloudflare")
-		if err := r.Status().Update(ctx, rateLimit); err != nil {
-			logger.Error(err, "Failed to update RateLimit status")
-			return ctrl.Result{}, err
-		}
-		logger.Info("Successfully created rate limit in Cloudflare", "ID", resp.ID)
-	} else {
-		// Update existing rate limit in Cloudflare
-		_, err := r.CloudflareAPI.UpdateRateLimit(ctx, rateLimit.Spec.ZoneID, rateLimit.Status.ID, cfRateLimit)
-		if err != nil {
-			logger.Error(err, "Failed to update rate limit in Cloudflare")
-			setRateLimitCondition(rateLimit, metav1.ConditionFalse, "UpdateFailed", err.Error())
-			if err := r.Status().Update(ctx, rateLimit); err != nil {
-				logger.Error(err, "Failed to update RateLimit status")
-			}
-			return ctrl.Result{}, err
-		}
-
-		setRateLimitCondition(rateLimit, metav1.ConditionTrue, "Updated", "Successfully updated in Cloudflare")
-		if err := r.Status().Update(ctx, rateLimit); err != nil {
-			logger.Error(err, "Failed to update RateLimit status")
-			return ctrl.Result{}, err
-		}
-		logger.Info("Successfully updated rate limit in Cloudflare", "ID", rateLimit.Status.ID)
-	}
-
-	return ctrl.Result{RequeueAfter: time.Minute * 30}, nil
-}
-
-// SetupRateLimitController sets up the controller with the Manager
-func SetupRateLimitController(mgr ctrl.Manager) error {
-	cfClient, err := client.NewCloudflareClient()
-	if err != nil {
-		return fmt.Errorf("failed to create Cloudflare client: %w", err)
-	}
-
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&cloudflareV1alpha1.RateLimit{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
-		Complete(&RateLimitReconciler{
-			Client:        mgr.GetClient(),
-			Scheme:        mgr.GetScheme(),
-			CloudflareAPI: cfClient,
-		})
-}
-package controller
-
-import (
-	"context"
-	"fmt"
-	"os"
-	"time"
-
-	"github.com/cloudflare/cloudflare-go"
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	cloudflareV1alpha1 "github.com/wzygadlo/kubeflare-light/pkg/apis/cloudflare/v1alpha1"
+	cfclient "github.com/wzygadlo/kubeflare-light/pkg/cloudflare/client"
 )
 
 const rateLimitFinalizer = "cloudflare.io/ratelimit-finalizer"
@@ -155,29 +27,31 @@ type RateLimitReconciler struct {
 	client.Client
 	Log    logr.Logger
 	Scheme *runtime.Scheme
-	CF     *cloudflare.API
+	CF     *cfclient.CloudflareClient
 }
 
+// +kubebuilder:rbac:groups=cloudflare.kubeflare.io,resources=ratelimits,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cloudflare.kubeflare.io,resources=ratelimits/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=cloudflare.kubeflare.io,resources=ratelimits/finalizers,verbs=update
+
+// SetupRateLimitController sets up the controller with the Manager
 func SetupRateLimitController(mgr ctrl.Manager) error {
-	// Initialize Cloudflare API client
-	cfAPI, err := cloudflare.NewWithAPIToken(os.Getenv("CLOUDFLARE_API_TOKEN"))
+	// Initialize Cloudflare client
+	cfClient, err := cfclient.NewClient(os.Getenv("CLOUDFLARE_API_TOKEN"))
 	if err != nil {
-		return fmt.Errorf("failed to create Cloudflare API client: %w", err)
+		return fmt.Errorf("failed to create Cloudflare client: %w", err)
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cloudflareV1alpha1.RateLimit{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(&RateLimitReconciler{
 			Client: mgr.GetClient(),
 			Log:    log.Log.WithName("controllers").WithName("RateLimit"),
 			Scheme: mgr.GetScheme(),
-			CF:     cfAPI,
+			CF:     cfClient,
 		})
 }
-
-// +kubebuilder:rbac:groups=cloudflare.io,resources=ratelimits,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=cloudflare.io,resources=ratelimits/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=cloudflare.io,resources=ratelimits/finalizers,verbs=update
 
 // Reconcile handles RateLimit resource reconciliation
 func (r *RateLimitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -231,14 +105,11 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 	log := r.Log.WithValues("ratelimit", rateLimit.Name)
 
 	// Convert Kubernetes RateLimit to Cloudflare RateLimit
-	cfRateLimit := r.convertToCloudflareLegacyRateLimit(rateLimit)
-
-	var cfID string
-	var err error
+	cfRateLimit := r.convertToCloudflareRateLimit(rateLimit)
 
 	if rateLimit.Status.CloudflareID == "" {
 		// Create new rate limit in Cloudflare
-		cfID, err = r.createCloudflareLegacyRateLimit(ctx, rateLimit.Spec.ZoneID, cfRateLimit)
+		resp, err := r.CF.CreateRateLimit(ctx, rateLimit.Spec.ZoneID, cfRateLimit)
 		if err != nil {
 			log.Error(err, "Failed to create rate limit in Cloudflare")
 			r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "CreateFailed", err.Error())
@@ -247,14 +118,14 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		}
 
 		// Update status with Cloudflare ID
-		rateLimit.Status.CloudflareID = cfID
+		rateLimit.Status.CloudflareID = resp.ID
 		rateLimit.Status.ObservedGeneration = rateLimit.Generation
 		r.updateCondition(rateLimit, "Ready", metav1.ConditionTrue, "Created", "Rate limit created successfully in Cloudflare")
 
-		log.Info("Created rate limit in Cloudflare", "cloudflareId", cfID)
+		log.Info("Created rate limit in Cloudflare", "cloudflareId", resp.ID)
 	} else {
 		// Update existing rate limit in Cloudflare
-		err = r.updateCloudflareLegacyRateLimit(ctx, rateLimit.Spec.ZoneID, rateLimit.Status.CloudflareID, cfRateLimit)
+		_, err := r.CF.UpdateRateLimit(ctx, rateLimit.Spec.ZoneID, rateLimit.Status.CloudflareID, cfRateLimit)
 		if err != nil {
 			log.Error(err, "Failed to update rate limit in Cloudflare")
 			r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "UpdateFailed", err.Error())
@@ -269,7 +140,7 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 	}
 
 	// Update status
-	err = r.Status().Update(ctx, rateLimit)
+	err := r.Status().Update(ctx, rateLimit)
 	if err != nil {
 		log.Error(err, "Failed to update RateLimit status")
 		return ctrl.Result{}, err
@@ -282,7 +153,7 @@ func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *
 	log := r.Log.WithValues("ratelimit", rateLimit.Name)
 
 	if rateLimit.Status.CloudflareID != "" {
-		err := r.deleteCloudflareLegacyRateLimit(ctx, rateLimit.Spec.ZoneID, rateLimit.Status.CloudflareID)
+		err := r.CF.DeleteRateLimit(ctx, rateLimit.Spec.ZoneID, rateLimit.Status.CloudflareID)
 		if err != nil {
 			log.Error(err, "Failed to delete rate limit from Cloudflare")
 			return err
@@ -293,153 +164,124 @@ func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *
 	return nil
 }
 
-func (r *RateLimitReconciler) convertToCloudflareLegacyRateLimit(rateLimit *cloudflareV1alpha1.RateLimit) cloudflare.RateLimit {
-	cfRateLimit := cloudflare.RateLimit{
+// convertToCloudflareRateLimit converts our CRD to Cloudflare API format
+func (r *RateLimitReconciler) convertToCloudflareRateLimit(rateLimit *cloudflareV1alpha1.RateLimit) cfclient.RateLimit {
+	cfRateLimit := cfclient.RateLimit{
 		ID:          rateLimit.Status.CloudflareID,
-		Disabled:    rateLimit.Spec.Disabled,
+		Name:        rateLimit.Name,
 		Description: rateLimit.Spec.Description,
-		Match: cloudflare.RateLimitTrafficMatcher{
-			Request: cloudflare.RateLimitRequestMatcher{
-				Methods:    rateLimit.Spec.Match.Request.Methods,
-				Schemes:    rateLimit.Spec.Match.Request.Schemes,
-				URLPattern: rateLimit.Spec.Match.Request.URLPattern,
-			},
-			Response: cloudflare.RateLimitResponseMatcher{
-				Statuses: rateLimit.Spec.Match.Response.StatusCodes,
-				Headers:  make([]cloudflare.RateLimitResponseMatcherHeaders, 0),
-			},
-		},
-		Threshold: rateLimit.Spec.Threshold,
-		Period:    rateLimit.Spec.Period,
-		Action: cloudflare.RateLimitAction{
-			Mode:    rateLimit.Spec.Action.Mode,
-			Timeout: rateLimit.Spec.Action.Timeout,
-		},
+		Disabled:    rateLimit.Spec.Disabled,
+		Threshold:   rateLimit.Spec.Threshold,
+		Period:      rateLimit.Spec.Period,
 	}
 
-	// Convert headers
-	for name, value := range rateLimit.Spec.Match.Response.Headers {
-		cfRateLimit.Match.Response.Headers = append(cfRateLimit.Match.Response.Headers,
-			cloudflare.RateLimitResponseMatcherHeaders{
-				Name:  name,
-				Value: value,
-			})
-	}
+	// Generate expression based on match criteria
+	if rateLimit.Spec.Match != nil {
+		// Convert match conditions to Cloudflare expression
+		expression := ""
 
-	// Convert action response if present
-	if rateLimit.Spec.Action.Response != nil {
-		cfRateLimit.Action.Response = &cloudflare.RateLimitActionResponse{
-			ContentType: rateLimit.Spec.Action.Response.ContentType,
-			Body:        rateLimit.Spec.Action.Response.Body,
+		// Add URL pattern if defined
+		if rateLimit.Spec.Match.Request != nil && rateLimit.Spec.Match.Request.URLPattern != "" {
+			expression = fmt.Sprintf("http.request.uri.path matches \"%s\"", rateLimit.Spec.Match.Request.URLPattern)
 		}
+
+		// Add methods if defined
+		if rateLimit.Spec.Match.Request != nil && len(rateLimit.Spec.Match.Request.Methods) > 0 {
+			methodExpr := "("
+			for i, method := range rateLimit.Spec.Match.Request.Methods {
+				if i > 0 {
+					methodExpr += " or "
+				}
+				methodExpr += fmt.Sprintf("http.request.method eq \"%s\"", method)
+			}
+			methodExpr += ")"
+
+			if expression != "" {
+				expression = fmt.Sprintf("(%s) and %s", expression, methodExpr)
+			} else {
+				expression = methodExpr
+			}
+		}
+
+		// Add schemes if defined
+		if rateLimit.Spec.Match.Request != nil && len(rateLimit.Spec.Match.Request.Schemes) > 0 {
+			schemeExpr := "("
+			for i, scheme := range rateLimit.Spec.Match.Request.Schemes {
+				if i > 0 {
+					schemeExpr += " or "
+				}
+				schemeExpr += fmt.Sprintf("http.request.scheme eq \"%s\"", scheme)
+			}
+			schemeExpr += ")"
+
+			if expression != "" {
+				expression = fmt.Sprintf("(%s) and %s", expression, schemeExpr)
+			} else {
+				expression = schemeExpr
+			}
+		}
+
+		// Add response statuses if defined
+		if rateLimit.Spec.Match.Response != nil && len(rateLimit.Spec.Match.Response.Statuses) > 0 {
+			statusExpr := "("
+			for i, status := range rateLimit.Spec.Match.Response.Statuses {
+				if i > 0 {
+					statusExpr += " or "
+				}
+				statusExpr += fmt.Sprintf("http.response.status eq %d", status)
+			}
+			statusExpr += ")"
+
+			if expression != "" {
+				expression = fmt.Sprintf("(%s) and %s", expression, statusExpr)
+			} else {
+				expression = statusExpr
+			}
+		}
+
+		// Use the generated expression if not empty
+		if expression != "" {
+			cfRateLimit.Expression = expression
+		} else {
+			// Default expression matches all requests
+			cfRateLimit.Expression = "true"
+		}
+	} else {
+		// Default expression matches all requests
+		cfRateLimit.Expression = "true"
 	}
 
+	// Set action based on action configuration
+	if rateLimit.Spec.Action != nil {
+		cfRateLimit.Action = rateLimit.Spec.Action.Mode
+	} else {
+		// Default action is block
+		cfRateLimit.Action = "block"
+	}
 	return cfRateLimit
 }
 
-func (r *RateLimitReconciler) createCloudflareLegacyRateLimit(ctx context.Context, zoneID string, rateLimit cloudflare.RateLimit) (string, error) {
-	result, err := r.CF.CreateRateLimit(ctx, cloudflare.ZoneIdentifier(zoneID), rateLimit)
-	if err != nil {
-		return "", err
-	}
-	return result.ID, nil
-}
-
-func (r *RateLimitReconciler) updateCloudflareLegacyRateLimit(ctx context.Context, zoneID, rateLimitID string, rateLimit cloudflare.RateLimit) error {
-	_, err := r.CF.UpdateRateLimit(ctx, cloudflare.ZoneIdentifier(zoneID), rateLimitID, rateLimit)
-	return err
-}
-
-func (r *RateLimitReconciler) deleteCloudflareLegacyRateLimit(ctx context.Context, zoneID, rateLimitID string) error {
-	return r.CF.DeleteRateLimit(ctx, cloudflare.ZoneIdentifier(zoneID), rateLimitID)
-}
-
+// updateCondition updates the condition status of the RateLimit resource
 func (r *RateLimitReconciler) updateCondition(rateLimit *cloudflareV1alpha1.RateLimit, conditionType string, status metav1.ConditionStatus, reason, message string) {
 	condition := metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
-		LastTransitionTime: metav1.Now(),
 		Reason:             reason,
 		Message:            message,
+		LastTransitionTime: metav1.Now(),
 	}
 
-	// Find and update existing condition or append new one
+	// Find existing condition or append new one
+	found := false
 	for i, existingCondition := range rateLimit.Status.Conditions {
 		if existingCondition.Type == conditionType {
 			rateLimit.Status.Conditions[i] = condition
-			return
-		}
-	}
-	rateLimit.Status.Conditions = append(rateLimit.Status.Conditions, condition)
-}
-// Helper functions
-
-func convertToCloudflareRateLimit(rl *cloudflareV1alpha1.RateLimit) (cloudflare.RateLimit, error) {
-	cfRL := cloudflare.RateLimit{
-		Description: rl.Spec.Description,
-		Threshold:   rl.Spec.Threshold,
-		Period:      rl.Spec.Period,
-		Action: cloudflare.RateLimitAction{
-			Mode: rl.Spec.Action.Mode,
-		},
-		Disabled: rl.Spec.Disabled,
-	}
-
-	// Set timeout if provided
-	if rl.Spec.Action.Timeout > 0 {
-		cfRL.Action.Timeout = rl.Spec.Action.Timeout
-	}
-
-	// Set custom response if provided
-	if rl.Spec.Action.Response != nil {
-		cfRL.Action.Response = &cloudflare.RateLimitActionResponse{
-			ContentType: rl.Spec.Action.Response.ContentType,
-			Body:        rl.Spec.Action.Response.Body,
+			found = true
+			break
 		}
 	}
 
-	// Set match criteria if provided
-	if rl.Spec.Match.Request != nil {
-		cfRL.Match = cloudflare.RateLimitMatch{
-			Request: &cloudflare.RateLimitMatchRequest{},
-		}
-
-		if len(rl.Spec.Match.Request.Methods) > 0 {
-			cfRL.Match.Request.Methods = rl.Spec.Match.Request.Methods
-		}
-
-		if len(rl.Spec.Match.Request.Schemes) > 0 {
-			cfRL.Match.Request.Schemes = rl.Spec.Match.Request.Schemes
-		}
-
-		if rl.Spec.Match.Request.URLPattern != "" {
-			cfRL.Match.Request.URL = rl.Spec.Match.Request.URLPattern
-		}
+	if !found {
+		rateLimit.Status.Conditions = append(rateLimit.Status.Conditions, condition)
 	}
-
-	return cfRL, nil
-}
-
-func setRateLimitCondition(rl *cloudflareV1alpha1.RateLimit, status metav1.ConditionStatus, reason, message string) {
-	condition := metav1.Condition{
-		Type:               "Ready",
-		Status:             status,
-		ObservedGeneration: rl.Generation,
-		LastTransitionTime: metav1.Now(),
-		Reason:             reason,
-		Message:            message,
-	}
-
-	// Find and update existing condition or append new one
-	for i, cond := range rl.Status.Conditions {
-		if cond.Type == "Ready" {
-			if cond.Status != status || cond.Reason != reason || cond.Message != message {
-				rl.Status.Conditions[i] = condition
-			}
-			return
-		}
-	}
-
-	// Condition not found, append new one
-	rl.Status.Conditions = append(rl.Status.Conditions, condition)
 }

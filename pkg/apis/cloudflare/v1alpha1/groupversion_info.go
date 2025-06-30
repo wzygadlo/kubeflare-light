@@ -1,4 +1,6 @@
 // Package v1alpha1 contains API Schema definitions for the cloudflare v1alpha1 API group
+// +kubebuilder:object:generate=true
+// +groupName=cloudflare.kubeflare.io
 package v1alpha1
 
 import (

@@ -19,26 +19,31 @@ type RateLimitSpec struct {
 	Period int `json:"period"`
 
 	// Action is the action to perform when the threshold is reached
-	Action RateLimitAction `json:"action"`
+	// +optional
+	Action *RateLimitAction `json:"action,omitempty"`
 
 	// Match defines the characteristics of requests that will be counted towards the threshold
-	Match RateLimitMatch `json:"match,omitempty"`
+	// +optional
+	Match *RateLimitMatch `json:"match,omitempty"`
 
 	// Disabled indicates whether this rate limit is currently disabled
+	// +optional
 	Disabled bool `json:"disabled,omitempty"`
 }
 
 // RateLimitAction defines the action to take when the rate limit is triggered
 type RateLimitAction struct {
 	// Mode is the type of action to perform
-	// Valid values are: "simulate", "ban", "challenge", "js_challenge", "managed_challenge"
+	// Valid values are: "simulate", "block", "challenge", "js_challenge", "managed_challenge"
 	Mode string `json:"mode"`
 
 	// Timeout is the time in seconds for the action to be in effect
-	// Required for "ban" mode
+	// Required for "ban" or "block" mode
+	// +optional
 	Timeout int `json:"timeout,omitempty"`
 
 	// Response is a custom response to be sent
+	// +optional
 	Response *RateLimitActionResponse `json:"response,omitempty"`
 }
 
@@ -54,25 +59,46 @@ type RateLimitActionResponse struct {
 // RateLimitMatch defines the characteristics of requests that will be counted
 type RateLimitMatch struct {
 	// Request defines the request characteristics to match
+	// +optional
 	Request *RateLimitMatchRequest `json:"request,omitempty"`
+	// Response defines the response characteristics to match
+	// +optional
+	Response *RateLimitMatchResponse `json:"response,omitempty"`
 }
 
 // RateLimitMatchRequest defines the request characteristics to match
 type RateLimitMatchRequest struct {
 	// Methods is a list of HTTP methods to match
+	// +optional
 	Methods []string `json:"methods,omitempty"`
 
 	// Schemes is a list of HTTP schemes to match
+	// +optional
 	Schemes []string `json:"schemes,omitempty"`
 
 	// URLPattern is a URL pattern to match
+	// +optional
 	URLPattern string `json:"urlPattern,omitempty"`
+}
+
+// RateLimitMatchResponse defines the response characteristics to match
+type RateLimitMatchResponse struct {
+	// Statuses is a list of HTTP status codes to match
+	// +optional
+	Statuses []int `json:"statuses,omitempty"`
+
+	// OriginTraffic indicates whether to match responses from origin servers
+	// +optional
+	OriginTraffic bool `json:"originTraffic,omitempty"`
 }
 
 // RateLimitStatus defines the observed state of RateLimit
 type RateLimitStatus struct {
-	// ID is the Cloudflare Rate Limit ID
-	ID string `json:"id,omitempty"`
+	// CloudflareID is the Cloudflare Rate Limit ID
+	CloudflareID string `json:"cloudflareId,omitempty"`
+
+	// ObservedGeneration is the most recent generation observed
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions represents the current state of the rate limit
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -83,10 +109,8 @@ type RateLimitStatus struct {
 // +kubebuilder:printcolumn:name="Zone",type=string,JSONPath=`.spec.zoneId`
 // +kubebuilder:printcolumn:name="Threshold",type=integer,JSONPath=`.spec.threshold`
 // +kubebuilder:printcolumn:name="Period",type=integer,JSONPath=`.spec.period`
-// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.action.mode`
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-
 // RateLimit is the Schema for the ratelimits API
 type RateLimit struct {
 	metav1.TypeMeta   `json:",inline"`

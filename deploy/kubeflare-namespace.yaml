@@ -1,0 +1,292 @@
+# Complete deployment for kubeflare-light controller in kubeflare namespace
+# This file contains all necessary resources for installation
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeflare
+  labels:
+    name: kubeflare
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/part-of: kubeflare-light
+
+---
+# ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeflare-light-controller
+  namespace: kubeflare
+  labels:
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/component: controller
+
+---
+# ClusterRole with all necessary permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeflare-light-manager-role
+  labels:
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/component: rbac
+rules:
+# RateLimit CRD permissions
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - ratelimits
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - ratelimits/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - ratelimits/status
+  verbs:
+  - get
+  - patch
+  - update
+
+# WAFRule CRD permissions
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - wafrules
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - wafrules/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - cloudflare.kubeflare.io
+  resources:
+  - wafrules/status
+  verbs:
+  - get
+  - patch
+  - update
+
+# ConfigMap permissions for zone resolution
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+
+# Events permissions for logging
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+
+# Leader election permissions
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - list
+  - update
+
+# Additional core permissions
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeflare-light-manager-rolebinding
+  labels:
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeflare-light-manager-role
+subjects:
+- kind: ServiceAccount
+  name: kubeflare-light-controller
+  namespace: kubeflare
+
+---
+# Zone configuration ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubeflare-zones
+  namespace: kubeflare
+  labels:
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/component: config
+data:
+  # Default zone ID - replace with your actual zone ID
+  default: "your-default-zone-id-here"
+  # Example domain mappings - add your domains
+  # example.com: "4b5c7c7ca06cddfe0fe680cf0b570920"
+  # api.example.com: "5c6d8d8db07dedfe0fe680cf0b570930"
+
+---
+# Secret for Cloudflare API token (you'll need to update this)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-api-token
+  namespace: kubeflare
+  labels:
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/component: credentials
+type: Opaque
+data:
+  # Replace with your base64-encoded Cloudflare API token
+  # To encode: echo -n "your-api-token" | base64
+  token: ""
+
+---
+# Controller Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeflare-light-controller
+  namespace: kubeflare
+  labels:
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/version: "v1"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubeflare-light
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubeflare-light
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: kubeflare-light-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+      - name: manager
+        image: kubeflare-light:v1
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+        env:
+        # Cloudflare API token
+        - name: CLOUDFLARE_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: cloudflare-api-token
+              key: token
+        # Zone configuration
+        - name: ZONES_CONFIGMAP_NAME
+          value: "kubeflare-zones"
+        - name: ZONES_CONFIGMAP_NAMESPACE
+          value: "kubeflare"
+        # Optional: Default zone ID fallback
+        - name: DEFAULT_ZONE_ID
+          value: ""
+        args:
+        - --metrics-addr=0.0.0.0:8080
+        - --health-probe-addr=0.0.0.0:8081
+        - --enable-leader-election
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      terminationGracePeriodSeconds: 10
+
+---
+# Service for metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubeflare-light-metrics
+  namespace: kubeflare
+  labels:
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/component: metrics
+spec:
+  selector:
+    app.kubernetes.io/name: kubeflare-light
+    app.kubernetes.io/component: controller
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: metrics
+    protocol: TCP
+  - name: health
+    port: 8081
+    targetPort: health
+    protocol: TCP

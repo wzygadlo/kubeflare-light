@@ -1,0 +1,78 @@
+# Helm values for deploying kubeflare-light to kubeflare namespace
+# Save this file and use it with: helm install kubeflare-light ./chart/kubeflare-light -f deploy/helm-kubeflare-values.yaml
+
+# Cloudflare Configuration
+cloudflare:
+  # Your Cloudflare API token - REQUIRED
+  apiToken: "your-cloudflare-api-token-here"
+  
+  # Optional: Use existing secret instead of creating new one
+  # existingSecret: "cloudflare-api-token"
+  # secretKey: "token"
+
+# Zone Configuration
+zones:
+  # Your default zone ID - REQUIRED
+  defaultZoneId: "your-default-zone-id-here"
+  
+  # ConfigMap name for zone mappings
+  configMapName: "kubeflare-zones"
+  
+  # Create ConfigMap for zones
+  createConfigMap: true
+  
+  # Domain to zone ID mappings
+  mappings:
+    # Add your domain mappings here
+    # example.com: "4b5c7c7ca06cddfe0fe680cf0b570920"
+    # api.example.com: "5c6d8d8db07dedfe0fe680cf0b570930"
+
+# Image Configuration (adjust if using local image)
+image:
+  repository: kubeflare-light
+  tag: v1
+  pullPolicy: IfNotPresent  # Change to Never for local Kind testing
+
+# Controller Configuration
+controller:
+  maxConcurrentReconciles: 1
+  leaderElection: true
+  metricsAddr: "0.0.0.0:8080"
+  healthProbeAddr: "0.0.0.0:8081"
+
+# Resource Configuration
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# Security Context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+# Service Configuration
+service:
+  type: ClusterIP
+  port: 8080
+
+# Replica count
+replicaCount: 1
+
+# Node selector, affinity, and tolerations
+nodeSelector: {}
+tolerations: []
+affinity: {}

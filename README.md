@@ -1,211 +1,288 @@
-# Kubeflare Light
+# 🛡️ Kubeflare Light
 
-A Kubernetes operator for managing Cloudflare rate limiting rules and WAF rules using Custom Resource Definitions (CRDs).
+[![Go Version](https://img.shields.io/badge/Go-1.24+-blue.svg)](https://golang.org/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.19+-blue.svg)](https://kubernetes.io/)
+[![Cloudflare SDK](https://img.shields.io/badge/Cloudflare%20SDK-v4.5.1-orange.svg)](https://github.com/cloudflare/cloudflare-go)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## Overview
+A production-ready Kubernetes controller for managing Cloudflare security resources using Custom Resource Definitions (CRDs). Built with the latest Cloudflare Rulesets API v4.5.1.
 
-Kubeflare Light allows you to manage your Cloudflare security rules directly from Kubernetes using familiar kubectl commands and YAML manifests. The operator watches for changes to RateLimit and WAFRule custom resources and automatically synchronizes them with your Cloudflare zones.
+## 🚀 Overview
 
-## Features
+Kubeflare Light provides a Kubernetes-native way to manage your Cloudflare security configuration. Define rate limits and WAF rules as YAML manifests and let the controller handle the synchronization with Cloudflare's API.
 
-- **Rate Limit Management**: Create, update, and delete Cloudflare rate limiting rules
-- **WAF Rule Management**: Manage Cloudflare WAF rules using the latest Rulesets API
-- **Kubernetes Native**: Full integration with Kubernetes RBAC, events, and status reporting
-- **Declarative Configuration**: Define your security rules as YAML manifests
-- **Status Reporting**: Real-time status updates and condition reporting
-- **Finalizer Support**: Proper cleanup of Cloudflare resources when Kubernetes resources are deleted
+### ✨ Key Benefits
+- **GitOps Ready**: Version control your security policies
+- **Kubernetes Native**: Full integration with K8s RBAC, events, and monitoring
+- **Modern API**: Uses Cloudflare's latest Rulesets API (v4.5.1)
+- **Production Ready**: Includes Helm charts, proper error handling, and observability
 
-## Prerequisites
+## 🎯 Features
 
-- Kubernetes cluster (v1.19+)
-- Cloudflare API token with Zone:Edit permissions
-- Go 1.24+ (for development)
-- Docker for building container images
-- Access to a container registry (Docker Hub, Google Container Registry, etc.)
+### Core Functionality
+- 🚦 **Rate Limit Management**: Create, update, and delete Cloudflare rate limiting rules
+- 🛡️ **WAF Rule Management**: Manage Cloudflare WAF rules using the latest Rulesets API
+- 🔧 **Kubernetes Native**: Full integration with Kubernetes RBAC, events, and status reporting
+- 📝 **Declarative Configuration**: Define your security rules as YAML manifests
+- 📊 **Status Reporting**: Real-time status updates and condition reporting
+- 🔄 **Finalizer Support**: Proper cleanup of Cloudflare resources when Kubernetes resources are deleted
 
-## Installation
+### Advanced Features
+- 🌐 **Zone Resolution**: Flexible zone ID resolution via ConfigMap
+- 📦 **Helm Charts**: Easy installation and configuration
+- 🔍 **Expression Validation**: Validates Cloudflare expression syntax
+- ⚡ **Performance Optimized**: Caching and concurrent processing
+- 🛠️ **Developer Friendly**: Comprehensive APIs and examples
 
-### 1. Clone the Repository
+## 📋 Prerequisites
 
+### Runtime Requirements
+- 🎛️ **Kubernetes cluster** (v1.19+)
+- 🔑 **Cloudflare API token** with Zone:Edit permissions
+- 🌐 **Access to Cloudflare zones** you want to manage
+
+### Development Requirements (Optional)
+- 🐹 **Go 1.24+** (for building from source)
+- 🐳 **Docker** (for building container images)
+- 📦 **Container registry access** (Docker Hub, GCR, etc.)
+- ⚓ **Helm 3.0+** (recommended for installation)
+
+## 🚀 Quick Start
+
+### Option 1: Helm Installation (Recommended)
+
+1. **Add your Cloudflare API token:**
+```bash
+helm install kubeflare-light ./chart/kubeflare-light \
+  --set cloudflare.apiToken="your-cloudflare-api-token-here" \
+  --set zones.defaultZoneId="your-zone-id-here"
+```
+
+2. **Or use an existing secret:**
+```bash
+kubectl create secret generic cloudflare-api-token \
+  --from-literal=token="your-cloudflare-api-token-here"
+
+helm install kubeflare-light ./chart/kubeflare-light \
+  --set cloudflare.existingSecret="cloudflare-api-token" \
+  --set zones.defaultZoneId="your-zone-id-here"
+```
+
+### Option 2: Manual Installation
+
+1. **Clone the repository:**
 ```bash
 git clone https://github.com/wzygadlo/kubeflare-light.git
 cd kubeflare-light
 ```
 
-### 2. Configure Your Environment
-
-Edit the Makefile to set your container registry and other variables:
-
+2. **Configure your environment:**
+Edit the Makefile to set your container registry:
 ```bash
-# Set your registry (replace docker.io/your-username)
 REGISTRY=docker.io/your-username
 IMAGE_NAME=kubeflare-light
 TAG=latest
 ```
 
-### 3. Generate Your Cloudflare API Token
+3. **Generate your Cloudflare API Token:**
+   - Log in to the Cloudflare dashboard
+   - Navigate to "My Profile" > "API Tokens" 
+   - Create a new token with Zone:Edit permissions
 
-1. Log in to the Cloudflare dashboard
-2. Navigate to "My Profile" > "API Tokens"
-3. Create a new token with Zone:Edit permissions for the zones you want to manage
-
-### 4. Build and Deploy
-
-You can build and deploy the operator using the provided Makefile:
-
+4. **Deploy:**
 ```bash
-# Build the binary, create Docker image, push to registry, and deploy to Kubernetes
 make all CLOUDFLARE_API_TOKEN=your-token
-
-# Or perform the steps individually:
-make build            # Build the Go binary
-make docker-build     # Build the Docker image
-make docker-push      # Push the image to your registry
-make deploy CLOUDFLARE_API_TOKEN=your-token  # Deploy to Kubernetes
 ```
 
-### 5. Verify the Installation
-
-Check that the operator is running:
+### ✅ Verify Installation
 
 ```bash
 kubectl get pods -n kubeflare-light-system
+kubectl get crd | grep cloudflare
 ```
 
-## Usage
+## 📖 Usage Guide
 
-### Creating a Rate Limit Rule
+### 🚦 Creating Rate Limit Rules
 
-Create a YAML file (e.g., `rate-limit.yaml`) for your rate limit rule:
-
+**Basic rate limiting example:**
 ```yaml
-apiVersion: cloudflare.io/v1alpha1
+apiVersion: cloudflare.kubeflare.io/v1alpha1
 kind: RateLimit
 metadata:
   name: api-rate-limit
   namespace: default
 spec:
-  zoneId: "your-zone-id-here"
-  description: "Rate limit for API endpoints to prevent abuse"
+  # Zone ID or domain name (resolved via ConfigMap)
+  zoneId: "example.com"
+  description: "Rate limit for API endpoints"
   match:
     request:
-      methods: ["GET", "POST", "PUT", "DELETE"]
-      schemes: ["https"]
-      urlPattern: "/api/*"
-    response:
-      statuses: [200, 201, 202]
-  threshold: 100
-  period: 60
+      urlPattern: "/api/v1/*"
+      methods: ["GET", "POST"]
+  threshold: 100        # requests per period
+  period: 60           # seconds
   action:
-    mode: "challenge"
-    timeout: 86400
-  disabled: false
+    mode: "block"
+    timeout: 300
 ```
 
-Apply the file to your cluster:
-
+**Apply the rule:**
 ```bash
 kubectl apply -f rate-limit.yaml
 ```
 
-### Creating a WAF Rule
+### 🛡️ Creating WAF Rules
 
-Create a YAML file (e.g., `waf-rule.yaml`) for your WAF rule:
-
+**Block malicious IPs:**
 ```yaml
-apiVersion: cloudflare.io/v1alpha1
+apiVersion: cloudflare.kubeflare.io/v1alpha1
 kind: WAFRule
 metadata:
   name: block-malicious-ips
   namespace: default
 spec:
-  zoneId: "your-zone-id-here"
-  description: "Block known malicious IP addresses and suspicious traffic"
-  expression: '(ip.src in {192.0.2.1 192.0.2.2 198.51.100.0/24}) or (cf.threat_score gt 14)'
+  zoneId: "example.com"
+  name: "Block Malicious IPs"
+  description: "Block known malicious IP addresses"
+  expression: 'ip.src in {192.0.2.1 198.51.100.1}'
   action: "block"
   priority: 1
-  paused: false
-  actionParameters:
-    response:
-      statusCode: 403
-      contentType: "application/json"
-      content: '{"error": "Access denied", "reason": "Your IP has been blocked due to suspicious activity"}'
 ```
 
-Apply the file to your cluster:
-
+**Apply the rule:**
 ```bash
 kubectl apply -f waf-rule.yaml
 ```
 
-### Deploying the Example Resources
+### 🌐 Zone Configuration
 
-You can deploy the example resources provided in the `examples` directory:
-
-```bash
-make generate-examples
-# or
-kubectl apply -f examples/
+Configure domain-to-zone mappings via ConfigMap:
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubeflare-zones
+  namespace: kubeflare-light-system
+data:
+  default: "4b5c7c7ca06cddfe0fe680cf0b570920"
+  example.com: "4b5c7c7ca06cddfe0fe680cf0b570920"
+  api.example.com: "5c6d8d8db07dedfe0fe680cf0b570930"
 ```
 
-### Checking Rule Status
+### 📊 Monitoring and Status
 
-Check the status of your rate limit rule:
-
+**Check resource status:**
 ```bash
-kubectl get ratelimit
+kubectl get ratelimits,wafrules
+kubectl describe ratelimit api-rate-limit
 ```
 
-Check the status of your WAF rule:
-
-```bash
-kubectl get wafrule
-```
-
-### Cleaning Up
-
-To remove the operator from your cluster:
-
-```bash
-make undeploy
-```
-
-## Development
-
-### Building Locally
-
-```bash
-make build
-```
-
-### Running Tests
-
-```bash
-make test
-```
-
-### Generating Manifests
-
-To regenerate CRD manifests:
-
-```bash
-make manifests
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Image Pull Errors**: Make sure your image is accessible to your Kubernetes cluster
-2. **API Token Errors**: Verify your Cloudflare API token has the required permissions
-3. **Zone ID Errors**: Confirm the Zone ID is correct for your domain
-
-### Checking Operator Logs
-
+**View controller logs:**
 ```bash
 kubectl logs -n kubeflare-light-system deployment/kubeflare-light-controller -f
 ```
 
-## License
+### 🗑️ Cleanup
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+**Remove specific rules:**
+```bash
+kubectl delete ratelimit api-rate-limit
+kubectl delete wafrule block-malicious-ips
+```
+
+**Uninstall controller:**
+```bash
+helm uninstall kubeflare-light
+# or
+make undeploy
+```
+
+## 🔧 Development
+
+### Local Development Setup
+```bash
+git clone https://github.com/wzygadlo/kubeflare-light.git
+cd kubeflare-light
+
+# Install dependencies
+go mod download
+
+# Build locally
+make build
+
+# Run tests
+make test
+
+# Generate manifests
+make manifests
+```
+
+### Testing with Kind
+```bash
+# Create Kind cluster
+kind create cluster --name kubeflare-test
+
+# Build and load image
+make docker-build
+kind load docker-image kubeflare-light:v1 --name kubeflare-test
+
+# Deploy with local image
+helm install kubeflare-light ./chart/kubeflare-light \
+  --set image.pullPolicy=Never \
+  --set cloudflare.apiToken="your-token"
+```
+
+## 🔍 Troubleshooting
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| 🚫 **Image Pull Errors** | Ensure image is accessible to cluster |
+| 🔑 **API Token Errors** | Verify token has Zone:Edit permissions |
+| 🌐 **Zone ID Errors** | Check zone ID format and ownership |
+| ⚠️ **Expression Errors** | Validate Cloudflare expression syntax |
+
+### Debugging Commands
+
+**Check controller status:**
+```bash
+kubectl get pods -n kubeflare-light-system
+kubectl describe deployment kubeflare-light-controller -n kubeflare-light-system
+```
+
+**View detailed logs:**
+```bash
+kubectl logs -n kubeflare-light-system deployment/kubeflare-light-controller -f
+```
+
+**Check resource events:**
+```bash
+kubectl get events --sort-by=.metadata.creationTimestamp
+```
+
+## 📚 Documentation
+
+| Type | Resource | Description |
+|------|----------|-------------|
+| **📚 Complete Docs** | [Documentation Hub](./docs/) | Comprehensive documentation portal |
+| **📖 API Reference** | [API Docs](./docs/api-reference.md) | Complete CRD specification |
+| **🔧 Developer Guide** | [Dev Guide](./docs/developer-guide.md) | Architecture and development |
+| **🛡️ Security Guide** | [Security](./docs/security.md) | Security best practices |
+| **🎯 Examples** | [Examples](./examples/) | Ready-to-use configurations |
+| **⚡ Quick Deploy** | [Helm Chart](./chart/kubeflare-light/) | Production deployment |
+
+## 🤝 Contributing
+
+Contributions are welcome! Please read our [Contributing Guidelines](./CONTRIBUTING.md) for details.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## ⭐ Acknowledgments
+
+- [Cloudflare Go SDK](https://github.com/cloudflare/cloudflare-go) for the excellent API client
+- [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) for the Kubernetes controller framework
+- The Kubernetes community for the amazing ecosystem

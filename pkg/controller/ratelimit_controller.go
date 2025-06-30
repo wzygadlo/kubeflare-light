@@ -152,7 +152,7 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 	}
 
 	// Update status
-	err := r.Status().Update(ctx, rateLimit)
+	err = r.Status().Update(ctx, rateLimit)
 	if err != nil {
 		log.Error(err, "Failed to update RateLimit status")
 		return ctrl.Result{}, err

@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"net/http"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -9,6 +10,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cloudflareV1alpha1 "github.com/wzygadlo/kubeflare-light/pkg/apis/cloudflare/v1alpha1"
 	"github.com/wzygadlo/kubeflare-light/pkg/controller"
@@ -26,8 +28,10 @@ func init() {
 
 func main() {
 	var metricsAddr string
+	var healthProbeAddr string
 	var enableLeaderElection bool
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "The address the metric endpoint binds to.")
+	flag.StringVar(&healthProbeAddr, "health-probe-addr", ":8081", "The address the health probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", false,
 		"Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
 	flag.Parse()
@@ -35,9 +39,13 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:           scheme,
-		LeaderElection:   enableLeaderElection,
-		LeaderElectionID: "kubeflare-light-leader-election",
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: metricsAddr,
+		},
+		HealthProbeBindAddress: healthProbeAddr,
+		LeaderElection:         enableLeaderElection,
+		LeaderElectionID:       "kubeflare-light-leader-election",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -52,6 +60,20 @@ func main() {
 
 	if err = controller.SetupWAFRuleController(mgr); err != nil {
 		setupLog.Error(err, "unable to create WAF rule controller", "controller", "WAFRule")
+		os.Exit(1)
+	}
+
+	// Add health checks
+	if err := mgr.AddHealthzCheck("healthz", func(req *http.Request) error {
+		return nil
+	}); err != nil {
+		setupLog.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
+		return nil
+	}); err != nil {
+		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
 

@@ -40,7 +40,7 @@ A production-ready Kubernetes controller that manages Cloudflare security resour
                        └──────────────────┘
 ```
 
-## 📦 Installation
+## Installation
 
 ### Prerequisites
 
@@ -76,7 +76,7 @@ kubectl create configmap kubeflare-zones -n kubeflare-light-system \
   --from-literal=example.com=zone-id-1
 ```
 
-## 📋 Usage Examples
+## Usage Examples
 
 ### Basic Rate Limiting
 
@@ -150,7 +150,7 @@ spec:
       blockAction: "challenge"
 ```
 
-## 🔧 Development
+## Development
 
 ### Build Commands
 
@@ -180,7 +180,7 @@ kind load docker-image kubeflare-light:latest --name kubeflare-test
 make deploy
 ```
 
-## 🔍 Monitoring
+## Monitoring
 
 ### Check Controller Status
 
@@ -206,9 +206,9 @@ kubectl get ratelimit test-limit -o jsonpath='{.status.conditions[0]}'
 kubectl get ratelimit test-limit -o jsonpath='{.status.cloudflareId}'
 ```
 
-## 🌟 Advanced Features
+## Advanced Features
 
-### 🔄 Drift Detection
+### Drift Detection
 
 The controller automatically detects when rules are manually deleted from the Cloudflare dashboard and recreates them to maintain the desired state:
 
@@ -224,7 +224,7 @@ The controller automatically detects when rules are manually deleted from the Cl
 3. Updates Kubernetes status with new Cloudflare ID
 4. Logs all drift detection events for monitoring
 
-### 🗺️ Zone Resolution
+### Zone Resolution
 
 Flexible domain-to-zone-ID mapping via ConfigMaps:
 
@@ -241,7 +241,7 @@ data:
   api.example.com: "zone-id-for-api-subdomain"
 ```
 
-### 🎯 URL Operators
+### URL Operators
 
 Complete Cloudflare expression syntax support with proper parentheses formatting:
 
@@ -265,7 +265,7 @@ spec:
       urlEndsWithAny: [".json", ".xml", ".csv"]    # Multiple end patterns
 ```
 
-### 🧹 Finalizer Cleanup
+### Finalizer Cleanup
 
 Ensures proper resource cleanup when deleting Kubernetes resources:
 
@@ -283,7 +283,7 @@ kubectl logs -n kubeflare-light-system deployment/kubeflare-light-controller-man
 kubectl patch ratelimit stuck-resource --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
-## 🚨 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -318,7 +318,7 @@ kubectl set env deployment/kubeflare-light-controller-manager DEBUG=true -n kube
 kubectl logs -f -n kubeflare-light-system deployment/kubeflare-light-controller-manager
 ```
 
-## 📚 Configuration Reference
+## Configuration Reference
 
 ### Environment Variables
 
@@ -344,7 +344,7 @@ kubectl logs -f -n kubeflare-light-system deployment/kubeflare-light-controller-
 - `observedGeneration` - Last processed generation
 - `conditions` - Ready status with reasons like "Created", "Updated", "Recreated"
 
-## 🔒 Security Features
+## Security Features
 
 ### Expression Injection Prevention
 - All user input is validated and sanitized
@@ -357,7 +357,7 @@ kubectl logs -f -n kubeflare-light-system deployment/kubeflare-light-controller-
 - Pod security contexts and network policies
 - Input validation at multiple levels
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
@@ -374,20 +374,20 @@ make deps
 make test
 ```
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🔗 Links
+## Links
 
 - [Cloudflare API Documentation](https://developers.cloudflare.com/api/)
 - [Kubernetes Custom Resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 - [Controller Runtime](https://book.kubebuilder.io/)
 
-## ⭐ Support
+## Support
 
 If you find this project helpful, please give it a star! For issues and feature requests, please use the [GitHub Issues](https://github.com/wzygadlo/kubeflare-light/issues) page.
 
 ---
 
-**Status**: ✅ Production Ready | ✅ Drift Detection | ✅ Finalizer Cleanup | ✅ Advanced Rate Limiting | ✅ Enterprise Features
+**Status**: Production Ready | Drift Detection | Finalizer Cleanup | Advanced Rate Limiting | Enterprise Features

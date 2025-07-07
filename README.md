@@ -8,17 +8,17 @@
 
 A production-ready Kubernetes controller that manages Cloudflare security resources (rate limits and WAF rules) through Custom Resource Definitions (CRDs). Built with modern Cloudflare Rulesets API, featuring comprehensive drift detection, advanced expression syntax, and enterprise-grade security.
 
-## 🚀 Features
+## Features
 
-- **🔄 Drift Detection**: Automatically recreates rules deleted from Cloudflare dashboard
-- **⚡ Advanced Rate Limiting**: Full 2024 Cloudflare features including Bot Management, JA3/JA4 fingerprinting
-- **🎯 Expression Syntax**: Complete URL operator support (wildcard, starts_with, ends_with, contains, eq, matches)
-- **🗺️ Zone Resolution**: Flexible domain-to-zone-ID mapping via ConfigMaps
-- **🧹 Finalizer Cleanup**: Ensures proper Cloudflare resource cleanup on deletion
-- **🔒 Security**: Expression validation prevents injection vulnerabilities
-- **🏢 Enterprise Ready**: Production-tested with proper error handling and resilient reconciliation
+- **Drift Detection**: Automatically recreates rules deleted from Cloudflare dashboard
+- **Advanced Rate Limiting**: Full 2024 Cloudflare features including Bot Management, JA3/JA4 fingerprinting
+- **Expression Syntax**: Complete URL operator support (wildcard, starts_with, ends_with, contains, eq, matches)
+- **Zone Resolution**: Flexible domain-to-zone-ID mapping via ConfigMaps
+- **Finalizer Cleanup**: Ensures proper Cloudflare resource cleanup on deletion
+- **Security**: Expression validation prevents injection vulnerabilities
+- **Enterprise Ready**: Production-tested with proper error handling and resilient reconciliation
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐

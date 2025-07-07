@@ -43,6 +43,29 @@ type FirewallRule struct {
 // Zone represents zone information
 type Zone = zones.Zone
 
+// CloudflareClientInterface defines the contract for Cloudflare API operations.
+// Following Go best practices: "accept interfaces, return structs"
+// This interface enables dependency injection and mocking for testing.
+type CloudflareClientInterface interface {
+	// Token and Zone operations
+	VerifyToken(ctx context.Context) error
+	GetZoneByName(ctx context.Context, zoneName string) (*Zone, error)
+
+	// Rate Limit operations
+	CreateRateLimit(ctx context.Context, zoneID string, rateLimit RateLimit) (*RateLimit, error)
+	GetRateLimit(ctx context.Context, zoneID, rateLimitID string) (*RateLimit, error)
+	UpdateRateLimit(ctx context.Context, zoneID, rateLimitID string, rateLimit RateLimit) (*RateLimit, error)
+	DeleteRateLimit(ctx context.Context, zoneID, rateLimitID string) error
+	ListRateLimits(ctx context.Context, zoneID string) ([]RateLimit, error)
+
+	// WAF Rule operations
+	CreateWAFRule(ctx context.Context, zoneID string, rule *FirewallRule) (*FirewallRule, error)
+	GetWAFRule(ctx context.Context, zoneID, ruleID string) (*FirewallRule, error)
+	UpdateWAFRule(ctx context.Context, zoneID, ruleID string, rule *FirewallRule) (*FirewallRule, error)
+	DeleteWAFRule(ctx context.Context, zoneID, ruleID string) error
+	ListWAFRules(ctx context.Context, zoneID string) ([]FirewallRule, error)
+}
+
 // NewClient creates a new Cloudflare v4 client with API token
 func NewClient(apiToken string) (*CloudflareClient, error) {
 	if apiToken == "" {

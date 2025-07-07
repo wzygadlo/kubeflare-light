@@ -34,8 +34,8 @@ type WAFActionParameters struct {
 	// ID specifies the action parameter ID
 	ID string `json:"id,omitempty"`
 
-	// Overrides specifies rule overrides
-	Overrides map[string]interface{} `json:"overrides,omitempty"`
+	// Overrides specifies rule overrides as key-value string pairs
+	Overrides map[string]string `json:"overrides,omitempty"`
 
 	// Response defines custom response for block actions
 	Response *WAFActionResponse `json:"response,omitempty"`

@@ -76,9 +76,183 @@ type RateLimitMatchRequest struct {
 	// +optional
 	Schemes []string `json:"schemes,omitempty"`
 
-	// URLPattern is a URL pattern to match
+	// URLPattern is a URL pattern to match (legacy - use specific operators below)
 	// +optional
 	URLPattern string `json:"urlPattern,omitempty"`
+
+	// === URL Operators (All Cloudflare Plans) ===
+
+	// URLWildcard matches paths using wildcard pattern (case-insensitive, free plan compatible)
+	// Example: "/api/*" matches "/api/users", "/api/orders"
+	// +optional
+	URLWildcard string `json:"urlWildcard,omitempty"`
+
+	// URLStartsWith matches paths starting with prefix (starts_with function)
+	// Example: "/api" matches "/api/users", "/api/v1/orders"
+	// +optional
+	URLStartsWith string `json:"urlStartsWith,omitempty"`
+
+	// URLEndsWith matches paths ending with suffix (ends_with function)
+	// Example: ".json" matches "/api/users.json", "/data.json"
+	// +optional
+	URLEndsWith string `json:"urlEndsWith,omitempty"`
+
+	// URLContains matches paths containing substring (contains function)
+	// Example: "admin" matches "/user/admin/panel", "/admin/settings"
+	// +optional
+	URLContains string `json:"urlContains,omitempty"`
+
+	// URLEquals matches exact path (eq operator)
+	// Example: "/health" matches only "/health"
+	// +optional
+	URLEquals string `json:"urlEquals,omitempty"`
+
+	// URLMatches matches paths using regex (requires paid plan)
+	// Example: "^/api/v[0-9]+/" matches "/api/v1/", "/api/v2/"
+	// +optional
+	URLMatches string `json:"urlMatches,omitempty"`
+
+	// === Multiple Pattern Arrays (OR conditions) ===
+
+	// URLWildcardAny matches paths using any of the wildcard patterns
+	// +optional
+	URLWildcardAny []string `json:"urlWildcardAny,omitempty"`
+
+	// URLStartsWithAny matches paths starting with any of the prefixes
+	// +optional
+	URLStartsWithAny []string `json:"urlStartsWithAny,omitempty"`
+
+	// URLEndsWithAny matches paths ending with any of the suffixes
+	// +optional
+	URLEndsWithAny []string `json:"urlEndsWithAny,omitempty"`
+
+	// URLContainsAny matches paths containing any of the substrings
+	// +optional
+	URLContainsAny []string `json:"urlContainsAny,omitempty"`
+
+	// URLEqualsAny matches any of the exact paths
+	// +optional
+	URLEqualsAny []string `json:"urlEqualsAny,omitempty"`
+
+	// URLMatchesAny matches paths using any of the regex patterns (requires paid plan)
+	// +optional
+	URLMatchesAny []string `json:"urlMatchesAny,omitempty"`
+
+	// === Header Matching ===
+
+	// Headers matches specific header values
+	// Key: header name (lowercase), Value: matching rule
+	// Examples: {"user-agent": "contains:bot", "x-api-key": "eq:secret123"}
+	// +optional
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// HeadersAny matches if any header rule matches (OR condition)
+	// +optional
+	HeadersAny map[string]string `json:"headersAny,omitempty"`
+
+	// Host matches the Host header value
+	// +optional
+	Host string `json:"host,omitempty"`
+
+	// HostAny matches any of the Host header values
+	// +optional
+	HostAny []string `json:"hostAny,omitempty"`
+
+	// UserAgent matches User-Agent header
+	// +optional
+	UserAgent string `json:"userAgent,omitempty"`
+
+	// Referer matches Referer header
+	// +optional
+	Referer string `json:"referer,omitempty"`
+
+	// === Cookie Matching ===
+
+	// Cookies matches specific cookie values
+	// Key: cookie name, Value: matching rule
+	// Examples: {"session": "exists", "user_id": "eq:123"}
+	// +optional
+	Cookies map[string]string `json:"cookies,omitempty"`
+
+	// === Query Parameter Matching ===
+
+	// QueryParams matches specific query parameter values
+	// Key: parameter name, Value: matching rule
+	// Examples: {"debug": "eq:true", "version": "contains:v1"}
+	// +optional
+	QueryParams map[string]string `json:"queryParams,omitempty"`
+
+	// === IP and Geography ===
+
+	// IPSources matches specific IP addresses or CIDR ranges
+	// Examples: ["192.168.1.1", "10.0.0.0/8"]
+	// +optional
+	IPSources []string `json:"ipSources,omitempty"`
+
+	// IPSourcesExclude excludes specific IP addresses or CIDR ranges
+	// +optional
+	IPSourcesExclude []string `json:"ipSourcesExclude,omitempty"`
+
+	// Countries matches requests from specific countries (ISO 3166-1 alpha-2)
+	// Examples: ["US", "CA", "GB"]
+	// +optional
+	Countries []string `json:"countries,omitempty"`
+
+	// CountriesExclude excludes requests from specific countries
+	// +optional
+	CountriesExclude []string `json:"countriesExclude,omitempty"`
+
+	// ASNs matches requests from specific Autonomous System Numbers
+	// +optional
+	ASNs []int `json:"asns,omitempty"`
+
+	// === Request Body (Enterprise Plans) ===
+
+	// BodySize matches request body size
+	// Examples: "gt:1024", "le:10240"
+	// +optional
+	BodySize string `json:"bodySize,omitempty"`
+
+	// BodyContains matches if request body contains text
+	// +optional
+	BodyContains string `json:"bodyContains,omitempty"`
+
+	// BodyFormFields matches form field values
+	// Key: field name, Value: matching rule
+	// +optional
+	BodyFormFields map[string]string `json:"bodyFormFields,omitempty"`
+
+	// BodyJSONFields matches JSON field values using JSONPath
+	// Key: JSON path, Value: matching rule
+	// Examples: {"user.id": "eq:123", "order.total": "gt:100"}
+	// +optional
+	BodyJSONFields map[string]string `json:"bodyJSONFields,omitempty"`
+
+	// === Bot Management (Enterprise Plans) ===
+
+	// BotScore matches requests with bot score in range
+	// Examples: "gt:30", "le:80"
+	// +optional
+	BotScore string `json:"botScore,omitempty"`
+
+	// VerifiedBot matches verified bot status
+	// +optional
+	VerifiedBot *bool `json:"verifiedBot,omitempty"`
+
+	// JA3Fingerprint matches specific JA3 TLS fingerprints
+	// +optional
+	JA3Fingerprint []string `json:"ja3Fingerprint,omitempty"`
+
+	// JA4Fingerprint matches specific JA4 TLS fingerprints
+	// +optional
+	JA4Fingerprint []string `json:"ja4Fingerprint,omitempty"`
+
+	// === Custom Expression ===
+
+	// CustomExpression allows writing raw Cloudflare expressions
+	// Use this for complex logic not covered by above fields
+	// +optional
+	CustomExpression string `json:"customExpression,omitempty"`
 }
 
 // RateLimitMatchResponse defines the response characteristics to match

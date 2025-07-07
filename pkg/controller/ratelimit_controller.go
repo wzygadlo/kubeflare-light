@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -116,8 +117,27 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 	}
 
-	// Convert Kubernetes RateLimit to Cloudflare RateLimit
-	cfRateLimit := r.convertToCloudflareRateLimit(rateLimit)
+	// Convert Kubernetes RateLimit to Cloudflare RateLimit using official 2025 API format
+	cfRateLimit := cfclient.RateLimit{
+		ID:          rateLimit.Status.CloudflareID,
+		Name:        rateLimit.Name,
+		Description: rateLimit.Spec.Description,
+		Disabled:    rateLimit.Spec.Disabled,
+		Threshold:   rateLimit.Spec.Threshold, // maps to requests_per_period
+		Period:      rateLimit.Spec.Period,    // official period parameter
+		Expression:  "true",                   // Default - will be built below
+		Action:      "block",                  // Default action
+	}
+
+	// Set action using official 2025 API actions
+	if rateLimit.Spec.Action != nil {
+		cfRateLimit.Action = rateLimit.Spec.Action.Mode // block, challenge, js_challenge, log
+	}
+
+	// Build comprehensive expression using all available operators
+	if rateLimit.Spec.Match != nil && rateLimit.Spec.Match.Request != nil {
+		cfRateLimit.Expression = r.buildCloudflareExpression(rateLimit.Spec.Match.Request)
+	}
 
 	if rateLimit.Status.CloudflareID == "" {
 		// Create new rate limit in Cloudflare
@@ -165,112 +185,450 @@ func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *
 	log := r.Log.WithValues("ratelimit", rateLimit.Name)
 
 	if rateLimit.Status.CloudflareID != "" {
-		err := r.CF.DeleteRateLimit(ctx, rateLimit.Spec.ZoneID, rateLimit.Status.CloudflareID)
+		// Resolve zone ID from ConfigMap if needed (same as in reconcile)
+		zoneID, err := r.ZoneResolver.ResolveZoneID(ctx, rateLimit.Spec.ZoneID)
+		if err != nil {
+			log.Error(err, "Failed to resolve zone ID during finalization")
+			return err
+		}
+
+		err = r.CF.DeleteRateLimit(ctx, zoneID, rateLimit.Status.CloudflareID)
 		if err != nil {
 			log.Error(err, "Failed to delete rate limit from Cloudflare")
 			return err
 		}
-		log.Info("Deleted rate limit from Cloudflare", "cloudflareId", rateLimit.Status.CloudflareID)
+		log.Info("Deleted rate limit from Cloudflare", "cloudflareId", rateLimit.Status.CloudflareID, "zoneId", zoneID)
 	}
 
 	return nil
 }
 
-// convertToCloudflareRateLimit converts our CRD to Cloudflare API format
-func (r *RateLimitReconciler) convertToCloudflareRateLimit(rateLimit *cloudflareV1alpha1.RateLimit) cfclient.RateLimit {
-	cfRateLimit := cfclient.RateLimit{
-		ID:          rateLimit.Status.CloudflareID,
-		Name:        rateLimit.Name,
-		Description: rateLimit.Spec.Description,
-		Disabled:    rateLimit.Spec.Disabled,
-		Threshold:   rateLimit.Spec.Threshold,
-		Period:      rateLimit.Spec.Period,
+// buildCloudflareExpression builds a comprehensive Cloudflare expression from CRD fields
+// Uses official 2025 Cloudflare operators and syntax with proper input sanitization
+func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.RateLimitMatchRequest) string {
+	var expressions []string
+
+	// === URL Operators (All Plans) ===
+
+	// Legacy URLPattern (for backward compatibility)
+	if req.URLPattern != "" {
+		expressions = append(expressions, fmt.Sprintf("(http.request.uri.path wildcard \"%s\")",
+			r.sanitizeString(req.URLPattern)))
 	}
 
-	// Generate expression based on match criteria
-	if rateLimit.Spec.Match != nil {
-		// Convert match conditions to Cloudflare expression
-		expression := ""
+	// Single URL operators
+	if req.URLWildcard != "" {
+		expressions = append(expressions, fmt.Sprintf("(http.request.uri.path wildcard \"%s\")",
+			r.sanitizeString(req.URLWildcard)))
+	}
+	if req.URLStartsWith != "" {
+		expressions = append(expressions, fmt.Sprintf("(starts_with(http.request.uri.path, \"%s\"))",
+			r.sanitizeString(req.URLStartsWith)))
+	}
+	if req.URLEndsWith != "" {
+		expressions = append(expressions, fmt.Sprintf("(ends_with(http.request.uri.path, \"%s\"))",
+			r.sanitizeString(req.URLEndsWith)))
+	}
+	if req.URLContains != "" {
+		expressions = append(expressions, fmt.Sprintf("(contains(http.request.uri.path, \"%s\"))",
+			r.sanitizeString(req.URLContains)))
+	}
+	if req.URLEquals != "" {
+		expressions = append(expressions, fmt.Sprintf("(http.request.uri.path eq \"%s\")",
+			r.sanitizeString(req.URLEquals)))
+	}
+	if req.URLMatches != "" {
+		expressions = append(expressions, fmt.Sprintf("(http.request.uri.path matches \"%s\")",
+			r.sanitizeString(req.URLMatches)))
+	}
 
-		// Add URL pattern if defined
-		if rateLimit.Spec.Match.Request != nil && rateLimit.Spec.Match.Request.URLPattern != "" {
-			expression = fmt.Sprintf("(http.request.uri.path wildcard \"%s\")", rateLimit.Spec.Match.Request.URLPattern)
+	// Multiple URL operators (OR conditions)
+	if len(req.URLWildcardAny) > 0 {
+		urlExprs := make([]string, len(req.URLWildcardAny))
+		for i, pattern := range req.URLWildcardAny {
+			urlExprs[i] = fmt.Sprintf("(http.request.uri.path wildcard \"%s\")", r.sanitizeString(pattern))
 		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
+	}
+	if len(req.URLStartsWithAny) > 0 {
+		urlExprs := make([]string, len(req.URLStartsWithAny))
+		for i, prefix := range req.URLStartsWithAny {
+			urlExprs[i] = fmt.Sprintf("(starts_with(http.request.uri.path, \"%s\"))", r.sanitizeString(prefix))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
+	}
+	if len(req.URLEndsWithAny) > 0 {
+		urlExprs := make([]string, len(req.URLEndsWithAny))
+		for i, suffix := range req.URLEndsWithAny {
+			urlExprs[i] = fmt.Sprintf("(ends_with(http.request.uri.path, \"%s\"))", r.sanitizeString(suffix))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
+	}
+	if len(req.URLContainsAny) > 0 {
+		urlExprs := make([]string, len(req.URLContainsAny))
+		for i, substring := range req.URLContainsAny {
+			urlExprs[i] = fmt.Sprintf("(contains(http.request.uri.path, \"%s\"))", r.sanitizeString(substring))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
+	}
+	if len(req.URLEqualsAny) > 0 {
+		urlExprs := make([]string, len(req.URLEqualsAny))
+		for i, path := range req.URLEqualsAny {
+			urlExprs[i] = fmt.Sprintf("(http.request.uri.path eq \"%s\")", r.sanitizeString(path))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
+	}
+	if len(req.URLMatchesAny) > 0 {
+		urlExprs := make([]string, len(req.URLMatchesAny))
+		for i, regex := range req.URLMatchesAny {
+			urlExprs[i] = fmt.Sprintf("(http.request.uri.path matches \"%s\")", r.sanitizeString(regex))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
+	}
 
-		// Add methods if defined
-		if rateLimit.Spec.Match.Request != nil && len(rateLimit.Spec.Match.Request.Methods) > 0 {
-			methodExpr := "("
-			for i, method := range rateLimit.Spec.Match.Request.Methods {
-				if i > 0 {
-					methodExpr += " or "
-				}
-				methodExpr += fmt.Sprintf("http.request.method eq \"%s\"", method)
-			}
-			methodExpr += ")"
+	// === HTTP Methods ===
+	if len(req.Methods) > 0 {
+		methodExprs := make([]string, len(req.Methods))
+		for i, method := range req.Methods {
+			methodExprs[i] = fmt.Sprintf("(http.request.method eq \"%s\")", r.sanitizeString(method))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(methodExprs, " or ")))
+	}
 
-			if expression != "" {
-				expression = fmt.Sprintf("(%s) and %s", expression, methodExpr)
-			} else {
-				expression = methodExpr
+	// === HTTP Schemes ===
+	if len(req.Schemes) > 0 {
+		schemeExprs := make([]string, len(req.Schemes))
+		for i, scheme := range req.Schemes {
+			schemeExprs[i] = fmt.Sprintf("(http.request.uri.scheme eq \"%s\")", r.sanitizeString(scheme))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(schemeExprs, " or ")))
+	}
+
+	// === Header Matching ===
+	if len(req.Headers) > 0 {
+		for headerName, rule := range req.Headers {
+			expr := r.buildHeaderExpression(headerName, rule)
+			if expr != "" {
+				expressions = append(expressions, expr)
 			}
 		}
-
-		// Add schemes if defined
-		if rateLimit.Spec.Match.Request != nil && len(rateLimit.Spec.Match.Request.Schemes) > 0 {
-			schemeExpr := "("
-			for i, scheme := range rateLimit.Spec.Match.Request.Schemes {
-				if i > 0 {
-					schemeExpr += " or "
-				}
-				schemeExpr += fmt.Sprintf("http.request.scheme eq \"%s\"", scheme)
-			}
-			schemeExpr += ")"
-
-			if expression != "" {
-				expression = fmt.Sprintf("(%s) and %s", expression, schemeExpr)
-			} else {
-				expression = schemeExpr
+	}
+	if len(req.HeadersAny) > 0 {
+		var headerExprs []string
+		for headerName, rule := range req.HeadersAny {
+			expr := r.buildHeaderExpression(headerName, rule)
+			if expr != "" {
+				headerExprs = append(headerExprs, expr)
 			}
 		}
+		if len(headerExprs) > 0 {
+			expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(headerExprs, " or ")))
+		}
+	}
 
-		// Add response statuses if defined
-		if rateLimit.Spec.Match.Response != nil && len(rateLimit.Spec.Match.Response.Statuses) > 0 {
-			statusExpr := "("
-			for i, status := range rateLimit.Spec.Match.Response.Statuses {
-				if i > 0 {
-					statusExpr += " or "
-				}
-				statusExpr += fmt.Sprintf("http.response.status eq %d", status)
-			}
-			statusExpr += ")"
+	// Special headers
+	if req.Host != "" {
+		expressions = append(expressions, fmt.Sprintf("(http.host eq \"%s\")", r.sanitizeString(req.Host)))
+	}
+	if len(req.HostAny) > 0 {
+		hostExprs := make([]string, len(req.HostAny))
+		for i, host := range req.HostAny {
+			hostExprs[i] = fmt.Sprintf("(http.host eq \"%s\")", r.sanitizeString(host))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(hostExprs, " or ")))
+	}
+	if req.UserAgent != "" {
+		expressions = append(expressions, fmt.Sprintf("(contains(lower(http.user_agent), \"%s\"))",
+			r.sanitizeString(strings.ToLower(req.UserAgent))))
+	}
+	if req.Referer != "" {
+		expressions = append(expressions, fmt.Sprintf("(http.referer eq \"%s\")", r.sanitizeString(req.Referer)))
+	}
 
-			if expression != "" {
-				expression = fmt.Sprintf("(%s) and %s", expression, statusExpr)
-			} else {
-				expression = statusExpr
+	// === Cookie Matching ===
+	if len(req.Cookies) > 0 {
+		for cookieName, rule := range req.Cookies {
+			expr := r.buildCookieExpression(cookieName, rule)
+			if expr != "" {
+				expressions = append(expressions, expr)
 			}
 		}
+	}
 
-		// Use the generated expression if not empty
-		if expression != "" {
-			cfRateLimit.Expression = expression
+	// === Query Parameters ===
+	if len(req.QueryParams) > 0 {
+		for paramName, rule := range req.QueryParams {
+			expr := r.buildQueryParamExpression(paramName, rule)
+			if expr != "" {
+				expressions = append(expressions, expr)
+			}
+		}
+	}
+
+	// === IP and Geography ===
+	if len(req.IPSources) > 0 {
+		if len(req.IPSources) == 1 {
+			expressions = append(expressions, fmt.Sprintf("(ip.src eq %s)", req.IPSources[0]))
 		} else {
-			// Default expression matches all requests
-			cfRateLimit.Expression = "true"
+			ipExprs := make([]string, len(req.IPSources))
+			for i, ip := range req.IPSources {
+				ipExprs[i] = fmt.Sprintf("(ip.src eq %s)", ip)
+			}
+			expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(ipExprs, " or ")))
 		}
-	} else {
-		// Default expression matches all requests
-		cfRateLimit.Expression = "true"
+	}
+	if len(req.IPSourcesExclude) > 0 {
+		if len(req.IPSourcesExclude) == 1 {
+			expressions = append(expressions, fmt.Sprintf("(ip.src ne %s)", req.IPSourcesExclude[0]))
+		} else {
+			ipExprs := make([]string, len(req.IPSourcesExclude))
+			for i, ip := range req.IPSourcesExclude {
+				ipExprs[i] = fmt.Sprintf("(ip.src ne %s)", ip)
+			}
+			expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(ipExprs, " and ")))
+		}
+	}
+	if len(req.Countries) > 0 {
+		countryExprs := make([]string, len(req.Countries))
+		for i, country := range req.Countries {
+			countryExprs[i] = fmt.Sprintf("(ip.geoip.country eq \"%s\")", r.sanitizeString(country))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(countryExprs, " or ")))
+	}
+	if len(req.CountriesExclude) > 0 {
+		countryExprs := make([]string, len(req.CountriesExclude))
+		for i, country := range req.CountriesExclude {
+			countryExprs[i] = fmt.Sprintf("(ip.geoip.country ne \"%s\")", r.sanitizeString(country))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(countryExprs, " and ")))
+	}
+	if len(req.ASNs) > 0 {
+		asnExprs := make([]string, len(req.ASNs))
+		for i, asn := range req.ASNs {
+			asnExprs[i] = fmt.Sprintf("(ip.geoip.asnum eq %d)", asn)
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(asnExprs, " or ")))
 	}
 
-	// Set action based on action configuration
-	if rateLimit.Spec.Action != nil {
-		cfRateLimit.Action = rateLimit.Spec.Action.Mode
-	} else {
-		// Default action is block
-		cfRateLimit.Action = "block"
+	// === Request Body (Enterprise) ===
+	if req.BodySize != "" {
+		expr := r.buildComparisonExpression("http.request.body.size", req.BodySize)
+		if expr != "" {
+			expressions = append(expressions, expr)
+		}
 	}
-	return cfRateLimit
+	if req.BodyContains != "" {
+		expressions = append(expressions, fmt.Sprintf("(contains(http.request.body.raw, \"%s\"))",
+			r.sanitizeString(req.BodyContains)))
+	}
+	if len(req.BodyFormFields) > 0 {
+		for fieldName, rule := range req.BodyFormFields {
+			expr := r.buildFormFieldExpression(fieldName, rule)
+			if expr != "" {
+				expressions = append(expressions, expr)
+			}
+		}
+	}
+	if len(req.BodyJSONFields) > 0 {
+		for jsonPath, rule := range req.BodyJSONFields {
+			expr := r.buildJSONFieldExpression(jsonPath, rule)
+			if expr != "" {
+				expressions = append(expressions, expr)
+			}
+		}
+	}
+
+	// === Bot Management (Enterprise) ===
+	if req.BotScore != "" {
+		expr := r.buildComparisonExpression("cf.bot_management.score", req.BotScore)
+		if expr != "" {
+			expressions = append(expressions, expr)
+		}
+	}
+	if req.VerifiedBot != nil {
+		if *req.VerifiedBot {
+			expressions = append(expressions, "(cf.bot_management.verified_bot)")
+		} else {
+			expressions = append(expressions, "(not cf.bot_management.verified_bot)")
+		}
+	}
+	if len(req.JA3Fingerprint) > 0 {
+		ja3Exprs := make([]string, len(req.JA3Fingerprint))
+		for i, fingerprint := range req.JA3Fingerprint {
+			ja3Exprs[i] = fmt.Sprintf("(cf.bot_management.ja3_hash eq \"%s\")", r.sanitizeString(fingerprint))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(ja3Exprs, " or ")))
+	}
+	if len(req.JA4Fingerprint) > 0 {
+		ja4Exprs := make([]string, len(req.JA4Fingerprint))
+		for i, fingerprint := range req.JA4Fingerprint {
+			ja4Exprs[i] = fmt.Sprintf("(cf.bot_management.ja4 eq \"%s\")", r.sanitizeString(fingerprint))
+		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(ja4Exprs, " or ")))
+	}
+
+	// === Custom Expression ===
+	if req.CustomExpression != "" {
+		// Validate and wrap custom expression
+		customExpr := strings.TrimSpace(req.CustomExpression)
+		if customExpr != "" {
+			if !strings.HasPrefix(customExpr, "(") {
+				customExpr = "(" + customExpr + ")"
+			}
+			expressions = append(expressions, customExpr)
+		}
+	}
+
+	// Combine all expressions with AND
+	if len(expressions) == 0 {
+		return "true" // Default: match all requests
+	}
+	if len(expressions) == 1 {
+		return expressions[0]
+	}
+	return strings.Join(expressions, " and ")
+}
+
+// Helper functions for expression building
+func (r *RateLimitReconciler) sanitizeString(input string) string {
+	// Escape quotes and prevent injection
+	return strings.ReplaceAll(input, "\"", "\\\"")
+}
+
+func (r *RateLimitReconciler) buildHeaderExpression(headerName, rule string) string {
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	operator, value := parts[0], parts[1]
+	headerName = r.sanitizeString(strings.ToLower(headerName))
+	value = r.sanitizeString(value)
+
+	switch operator {
+	case "eq":
+		return fmt.Sprintf("(http.request.headers[\"%s\"][0] eq \"%s\")", headerName, value)
+	case "contains":
+		return fmt.Sprintf("(contains(http.request.headers[\"%s\"][0], \"%s\"))", headerName, value)
+	case "exists":
+		return fmt.Sprintf("(http.request.headers[\"%s\"][0] ne \"\")", headerName)
+	default:
+		return ""
+	}
+}
+
+func (r *RateLimitReconciler) buildCookieExpression(cookieName, rule string) string {
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	operator, value := parts[0], parts[1]
+	cookieName = r.sanitizeString(cookieName)
+	value = r.sanitizeString(value)
+
+	switch operator {
+	case "eq":
+		return fmt.Sprintf("(http.cookie[\"%s\"] eq \"%s\")", cookieName, value)
+	case "contains":
+		return fmt.Sprintf("(contains(http.cookie[\"%s\"], \"%s\"))", cookieName, value)
+	case "exists":
+		return fmt.Sprintf("(http.cookie[\"%s\"] ne \"\")", cookieName)
+	default:
+		return ""
+	}
+}
+
+func (r *RateLimitReconciler) buildQueryParamExpression(paramName, rule string) string {
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	operator, value := parts[0], parts[1]
+	paramName = r.sanitizeString(paramName)
+	value = r.sanitizeString(value)
+
+	switch operator {
+	case "eq":
+		return fmt.Sprintf("(http.request.uri.args[\"%s\"][0] eq \"%s\")", paramName, value)
+	case "contains":
+		return fmt.Sprintf("(contains(http.request.uri.args[\"%s\"][0], \"%s\"))", paramName, value)
+	case "exists":
+		return fmt.Sprintf("(http.request.uri.args[\"%s\"][0] ne \"\")", paramName)
+	default:
+		return ""
+	}
+}
+
+func (r *RateLimitReconciler) buildComparisonExpression(field, rule string) string {
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	operator, value := parts[0], parts[1]
+
+	switch operator {
+	case "eq":
+		return fmt.Sprintf("(%s eq %s)", field, value)
+	case "ne":
+		return fmt.Sprintf("(%s ne %s)", field, value)
+	case "gt":
+		return fmt.Sprintf("(%s gt %s)", field, value)
+	case "ge":
+		return fmt.Sprintf("(%s ge %s)", field, value)
+	case "lt":
+		return fmt.Sprintf("(%s lt %s)", field, value)
+	case "le":
+		return fmt.Sprintf("(%s le %s)", field, value)
+	default:
+		return ""
+	}
+}
+
+func (r *RateLimitReconciler) buildFormFieldExpression(fieldName, rule string) string {
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	operator, value := parts[0], parts[1]
+	fieldName = r.sanitizeString(fieldName)
+	value = r.sanitizeString(value)
+
+	switch operator {
+	case "eq":
+		return fmt.Sprintf("(http.request.body.form[\"%s\"][0] eq \"%s\")", fieldName, value)
+	case "contains":
+		return fmt.Sprintf("(contains(http.request.body.form[\"%s\"][0], \"%s\"))", fieldName, value)
+	case "exists":
+		return fmt.Sprintf("(http.request.body.form[\"%s\"][0] ne \"\")", fieldName)
+	default:
+		return ""
+	}
+}
+
+func (r *RateLimitReconciler) buildJSONFieldExpression(jsonPath, rule string) string {
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	operator, value := parts[0], parts[1]
+	jsonPath = r.sanitizeString(jsonPath)
+	value = r.sanitizeString(value)
+
+	switch operator {
+	case "eq":
+		return fmt.Sprintf("(lookup_json_string(http.request.body.raw, \"%s\") eq \"%s\")", jsonPath, value)
+	case "contains":
+		return fmt.Sprintf("(contains(lookup_json_string(http.request.body.raw, \"%s\"), \"%s\"))", jsonPath, value)
+	case "exists":
+		return fmt.Sprintf("(lookup_json_string(http.request.body.raw, \"%s\") ne \"\")", jsonPath)
+	default:
+		return ""
+	}
 }
 
 // updateCondition updates the condition status of the RateLimit resource

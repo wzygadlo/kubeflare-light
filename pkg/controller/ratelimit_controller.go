@@ -27,10 +27,12 @@ const rateLimitFinalizer = "cloudflare.io/ratelimit-finalizer"
 // RateLimitReconciler reconciles a RateLimit object
 type RateLimitReconciler struct {
 	client.Client
-	Log          logr.Logger
-	Scheme       *runtime.Scheme
-	CF           *cfclient.CloudflareClient
-	ZoneResolver *utils.ZoneResolver
+	Log               logr.Logger
+	Scheme            *runtime.Scheme
+	CF                *cfclient.CloudflareClient
+	ZoneResolver      *utils.ZoneResolver
+	ReconcileInterval time.Duration
+	ErrorInterval     time.Duration
 }
 
 // +kubebuilder:rbac:groups=cloudflare.kubeflare.io,resources=ratelimits,verbs=get;list;watch;create;update;patch;delete
@@ -45,15 +47,25 @@ func SetupRateLimitController(mgr ctrl.Manager) error {
 		return fmt.Errorf("failed to create Cloudflare client: %w", err)
 	}
 
+	// Parse configurable intervals from environment variables
+	reconcileInterval := parseInterval("RECONCILE_INTERVAL", "10m")
+	errorInterval := parseInterval("ERROR_RETRY_INTERVAL", "5m")
+
+	log.Log.WithName("setup").Info("Rate limit controller configuration",
+		"reconcileInterval", reconcileInterval,
+		"errorInterval", errorInterval)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cloudflareV1alpha1.RateLimit{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(&RateLimitReconciler{
-			Client:       mgr.GetClient(),
-			Log:          log.Log.WithName("controllers").WithName("RateLimit"),
-			Scheme:       mgr.GetScheme(),
-			CF:           cfClient,
-			ZoneResolver: utils.NewZoneResolver(mgr.GetClient()),
+			Client:            mgr.GetClient(),
+			Log:               log.Log.WithName("controllers").WithName("RateLimit"),
+			Scheme:            mgr.GetScheme(),
+			CF:                cfClient,
+			ZoneResolver:      utils.NewZoneResolver(mgr.GetClient()),
+			ReconcileInterval: reconcileInterval,
+			ErrorInterval:     errorInterval,
 		})
 }
 
@@ -114,14 +126,14 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		log.Error(err, "Failed to resolve zone ID")
 		r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "ZoneResolutionFailed", err.Error())
 		r.Status().Update(ctx, rateLimit)
-		return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+		return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
 	}
 
 	// Convert Kubernetes RateLimit to Cloudflare RateLimit using official 2025 API format
 	cfRateLimit := cfclient.RateLimit{
 		ID:          rateLimit.Status.CloudflareID,
 		Name:        rateLimit.Name,
-		Description: rateLimit.Spec.Description,
+		Description: rateLimit.Name, // Use Kubernetes name as Cloudflare description for alignment
 		Disabled:    rateLimit.Spec.Disabled,
 		Threshold:   rateLimit.Spec.Threshold, // maps to requests_per_period
 		Period:      rateLimit.Spec.Period,    // official period parameter
@@ -146,7 +158,7 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 			log.Error(err, "Failed to create rate limit in Cloudflare")
 			r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "CreateFailed", err.Error())
 			r.Status().Update(ctx, rateLimit)
-			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+			return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
 		}
 
 		// Update status with Cloudflare ID
@@ -156,19 +168,52 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 
 		log.Info("Created rate limit in Cloudflare", "cloudflareId", resp.ID)
 	} else {
-		// Update existing rate limit in Cloudflare
-		_, err := r.CF.UpdateRateLimit(ctx, zoneID, rateLimit.Status.CloudflareID, cfRateLimit)
+		// Always check current state from Cloudflare to detect external changes (drift detection)
+		currentCFRateLimit, err := r.CF.GetRateLimit(ctx, zoneID, rateLimit.Status.CloudflareID)
 		if err != nil {
-			log.Error(err, "Failed to update rate limit in Cloudflare")
-			r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "UpdateFailed", err.Error())
+			log.Error(err, "Failed to get current rate limit from Cloudflare")
+			// If rule was deleted in Cloudflare, recreate it
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+				log.Info("Rate limit not found in Cloudflare, recreating", "cloudflareId", rateLimit.Status.CloudflareID)
+				rateLimit.Status.CloudflareID = "" // Reset ID to trigger recreation
+				rateLimit.Status.ObservedGeneration = 0
+				return r.reconcileRateLimit(ctx, rateLimit) // Retry reconciliation
+			}
+			r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "GetFailed", err.Error())
 			r.Status().Update(ctx, rateLimit)
-			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+			return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
 		}
 
-		rateLimit.Status.ObservedGeneration = rateLimit.Generation
-		r.updateCondition(rateLimit, "Ready", metav1.ConditionTrue, "Updated", "Rate limit updated successfully in Cloudflare")
+		// Check if update is needed by comparing desired vs current state
+		needsUpdate := r.rateLimitNeedsUpdate(&cfRateLimit, currentCFRateLimit)
+		specChanged := rateLimit.Status.ObservedGeneration != rateLimit.Generation
 
-		log.Info("Updated rate limit in Cloudflare", "cloudflareId", rateLimit.Status.CloudflareID)
+		if needsUpdate || specChanged {
+			// Update existing rate limit in Cloudflare
+			_, err := r.CF.UpdateRateLimit(ctx, zoneID, rateLimit.Status.CloudflareID, cfRateLimit)
+			if err != nil {
+				log.Error(err, "Failed to update rate limit in Cloudflare")
+				r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, "UpdateFailed", err.Error())
+				r.Status().Update(ctx, rateLimit)
+				return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
+			}
+
+			rateLimit.Status.ObservedGeneration = rateLimit.Generation
+			r.updateCondition(rateLimit, "Ready", metav1.ConditionTrue, "Updated", "Rate limit updated successfully in Cloudflare")
+
+			if specChanged {
+				log.Info("Updated rate limit in Cloudflare due to spec change", "cloudflareId", rateLimit.Status.CloudflareID)
+			} else {
+				log.Info("Updated rate limit in Cloudflare due to drift", "cloudflareId", rateLimit.Status.CloudflareID)
+			}
+		} else {
+			// No update needed, mark as observed if spec changed
+			if specChanged {
+				rateLimit.Status.ObservedGeneration = rateLimit.Generation
+			}
+			r.updateCondition(rateLimit, "Ready", metav1.ConditionTrue, "Synced", "Rate limit is in sync with Cloudflare")
+			log.V(1).Info("Rate limit is in sync with Cloudflare", "cloudflareId", rateLimit.Status.CloudflareID)
+		}
 	}
 
 	// Update status
@@ -178,7 +223,7 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{RequeueAfter: time.Minute * 10}, nil
+	return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
 }
 
 func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *cloudflareV1alpha1.RateLimit) error {
@@ -629,6 +674,43 @@ func (r *RateLimitReconciler) buildJSONFieldExpression(jsonPath, rule string) st
 	default:
 		return ""
 	}
+}
+
+// rateLimitNeedsUpdate compares desired state with current Cloudflare state
+func (r *RateLimitReconciler) rateLimitNeedsUpdate(desired, current *cfclient.RateLimit) bool {
+	if current == nil {
+		r.Log.Info("Rate limit update needed: current state is nil")
+		return true // If we can't get current state, assume update is needed
+	}
+
+	// Compare key fields that would indicate a change is needed
+	if desired.Description != current.Description {
+		r.Log.Info("Rate limit update needed: description mismatch", "desired", desired.Description, "current", current.Description)
+		return true
+	}
+	if desired.Expression != current.Expression {
+		r.Log.Info("Rate limit update needed: expression mismatch", "desired", desired.Expression, "current", current.Expression)
+		return true
+	}
+	if desired.Action != current.Action {
+		r.Log.Info("Rate limit update needed: action mismatch", "desired", desired.Action, "current", current.Action)
+		return true
+	}
+	if desired.Threshold != current.Threshold {
+		r.Log.Info("Rate limit update needed: threshold mismatch", "desired", desired.Threshold, "current", current.Threshold)
+		return true
+	}
+	if desired.Period != current.Period {
+		r.Log.Info("Rate limit update needed: period mismatch", "desired", desired.Period, "current", current.Period)
+		return true
+	}
+	if desired.Disabled != current.Disabled {
+		r.Log.Info("Rate limit update needed: disabled mismatch", "desired", desired.Disabled, "current", current.Disabled)
+		return true
+	}
+
+	r.Log.V(1).Info("Rate limit no update needed: all fields match")
+	return false // No differences found
 }
 
 // updateCondition updates the condition status of the RateLimit resource

@@ -24,9 +24,11 @@ const wafRuleFinalizer = "cloudflare.io/wafrule-finalizer"
 // WAFRuleReconciler reconciles a WAFRule object
 type WAFRuleReconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
-	CF     *cfclient.CloudflareClient
+	Log               logr.Logger
+	Scheme            *runtime.Scheme
+	CF                *cfclient.CloudflareClient
+	ReconcileInterval time.Duration
+	ErrorInterval     time.Duration
 }
 
 func SetupWAFRuleController(mgr ctrl.Manager) error {
@@ -36,13 +38,23 @@ func SetupWAFRuleController(mgr ctrl.Manager) error {
 		return fmt.Errorf("failed to create Cloudflare client: %w", err)
 	}
 
+	// Parse configurable intervals from environment variables (shared with RateLimit controller)
+	reconcileInterval := parseInterval("RECONCILE_INTERVAL", "10m")
+	errorInterval := parseInterval("ERROR_RETRY_INTERVAL", "5m")
+
+	log.Log.WithName("setup").Info("WAF rule controller configuration",
+		"reconcileInterval", reconcileInterval,
+		"errorInterval", errorInterval)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cloudflareV1alpha1.WAFRule{}).
 		Complete(&WAFRuleReconciler{
-			Client: mgr.GetClient(),
-			Log:    log.Log.WithName("controllers").WithName("WAFRule"),
-			Scheme: mgr.GetScheme(),
-			CF:     cfClient,
+			Client:            mgr.GetClient(),
+			Log:               log.Log.WithName("controllers").WithName("WAFRule"),
+			Scheme:            mgr.GetScheme(),
+			CF:                cfClient,
+			ReconcileInterval: reconcileInterval,
+			ErrorInterval:     errorInterval,
 		})
 }
 
@@ -111,7 +123,7 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 			log.Error(err, "Failed to create WAF rule in Cloudflare")
 			r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, "CreateFailed", err.Error())
 			r.Status().Update(ctx, wafRule)
-			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+			return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
 		}
 
 		// Update status with Cloudflare ID
@@ -127,7 +139,7 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 			log.Error(err, "Failed to update WAF rule in Cloudflare")
 			r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, "UpdateFailed", err.Error())
 			r.Status().Update(ctx, wafRule)
-			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+			return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
 		}
 
 		wafRule.Status.ObservedGeneration = wafRule.Generation
@@ -143,7 +155,7 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{RequeueAfter: time.Minute * 10}, nil
+	return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
 }
 
 func (r *WAFRuleReconciler) finalizeWAFRule(ctx context.Context, wafRule *cloudflareV1alpha1.WAFRule) error {

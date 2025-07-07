@@ -370,17 +370,51 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 		if rule.ID == rateLimitID {
 			rateLimit := RateLimit{
 				ID:          rule.ID,
-				Description: rule.Description,
+				Name:        rule.Description, // Cloudflare stores name in description field
+				Description: rule.Description, // Keep description same as name for consistency
 				Expression:  rule.Expression,
 				Action:      string(rule.Action),
+				Disabled:    !rule.Enabled, // Convert enabled to disabled
 			}
 
-			// Extract rate limit parameters from block rule
-			if rule.Action == "block" {
+			// Extract rate limit parameters from the ratelimit configuration
+			if rule.Action == "block" && rule.Ratelimit != nil {
 				rateLimit.Action = "block"
-				// For now, return default threshold and period as we can't easily extract from response
-				rateLimit.Threshold = 100 // Default from example
-				rateLimit.Period = 60     // Default from example
+
+				// Try to cast to the actual BlockRuleRatelimit struct type
+				if blockRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
+					// Extract values from the structured type (fields are int64, not pointers)
+					rateLimit.Threshold = int(blockRateLimit.RequestsPerPeriod)
+					rateLimit.Period = int(blockRateLimit.Period)
+				} else {
+					// Try alternative: access via reflection or type assertion
+					fmt.Printf("DEBUG: rule.Ratelimit type: %T, trying alternative extraction\n", rule.Ratelimit)
+
+					// Fallback: try to extract via interface{} reflection
+					if rateLimitInterface, ok := rule.Ratelimit.(interface {
+						GetRequestsPerPeriod() *int64
+						GetPeriod() *int64
+					}); ok {
+						if reqsPerPeriod := rateLimitInterface.GetRequestsPerPeriod(); reqsPerPeriod != nil {
+							rateLimit.Threshold = int(*reqsPerPeriod)
+						}
+						if period := rateLimitInterface.GetPeriod(); period != nil {
+							rateLimit.Period = int(*period)
+						}
+					}
+				}
+
+				// Set defaults if extraction failed
+				if rateLimit.Threshold == 0 {
+					rateLimit.Threshold = 100
+				}
+				if rateLimit.Period == 0 {
+					rateLimit.Period = 60
+				}
+			} else {
+				// Fallback defaults if ratelimit config is missing
+				rateLimit.Threshold = 100
+				rateLimit.Period = 60
 			}
 
 			return &rateLimit, nil

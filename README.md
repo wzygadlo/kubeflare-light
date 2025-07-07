@@ -379,7 +379,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Links
 
-- [Cloudflare API Documentation](https://developers.cloudflare.com/api/)
+- [Cloudflare API Documentation](https://developers.cloudflare.com/api/go)
 - [Kubernetes Custom Resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 - [Controller Runtime](https://book.kubebuilder.io/)
 

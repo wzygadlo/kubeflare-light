@@ -4,7 +4,6 @@
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.19+-blue.svg)](https://kubernetes.io/)
 [![Cloudflare API](https://img.shields.io/badge/Cloudflare%20API-v4.5.1-orange.svg)](https://developers.cloudflare.com/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Production Ready](https://img.shields.io/badge/Production-Ready-green.svg)](./docs/production.md)
 
 A production-ready Kubernetes controller that manages Cloudflare security resources (rate limits and WAF rules) through Custom Resource Definitions (CRDs). Built with modern Cloudflare Rulesets API, featuring comprehensive drift detection, advanced expression syntax, and enterprise-grade security.
 
@@ -384,10 +383,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Kubernetes Custom Resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 - [Controller Runtime](https://book.kubebuilder.io/)
 
-## Support
-
-If you find this project helpful, please give it a star! For issues and feature requests, please use the [GitHub Issues](https://github.com/wzygadlo/kubeflare-light/issues) page.
-
----
 
 **Status**: Production Ready | Drift Detection | Finalizer Cleanup | Advanced Rate Limiting | Enterprise Features

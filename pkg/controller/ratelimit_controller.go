@@ -257,33 +257,33 @@ func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.
 
 	// Legacy URLPattern (for backward compatibility)
 	if req.URLPattern != "" {
-		expressions = append(expressions, fmt.Sprintf("(http.request.uri.path wildcard \"%s\")",
+		expressions = append(expressions, fmt.Sprintf("(http.request.uri wildcard \"%s\")",
 			r.sanitizeString(req.URLPattern)))
 	}
 
 	// Single URL operators
 	if req.URLWildcard != "" {
-		expressions = append(expressions, fmt.Sprintf("(http.request.uri.path wildcard \"%s\")",
+		expressions = append(expressions, fmt.Sprintf("(http.request.uri wildcard \"%s\")",
 			r.sanitizeString(req.URLWildcard)))
 	}
 	if req.URLStartsWith != "" {
-		expressions = append(expressions, fmt.Sprintf("(starts_with(http.request.uri.path, \"%s\"))",
+		expressions = append(expressions, fmt.Sprintf("(starts_with(http.request.uri, \"%s\"))",
 			r.sanitizeString(req.URLStartsWith)))
 	}
 	if req.URLEndsWith != "" {
-		expressions = append(expressions, fmt.Sprintf("(ends_with(http.request.uri.path, \"%s\"))",
+		expressions = append(expressions, fmt.Sprintf("(ends_with(http.request.uri, \"%s\"))",
 			r.sanitizeString(req.URLEndsWith)))
 	}
 	if req.URLContains != "" {
-		expressions = append(expressions, fmt.Sprintf("(contains(http.request.uri.path, \"%s\"))",
+		expressions = append(expressions, fmt.Sprintf("(contains(http.request.uri, \"%s\"))",
 			r.sanitizeString(req.URLContains)))
 	}
 	if req.URLEquals != "" {
-		expressions = append(expressions, fmt.Sprintf("(http.request.uri.path eq \"%s\")",
+		expressions = append(expressions, fmt.Sprintf("(http.request.uri eq \"%s\")",
 			r.sanitizeString(req.URLEquals)))
 	}
 	if req.URLMatches != "" {
-		expressions = append(expressions, fmt.Sprintf("(http.request.uri.path matches \"%s\")",
+		expressions = append(expressions, fmt.Sprintf("(http.request.uri matches \"%s\")",
 			r.sanitizeString(req.URLMatches)))
 	}
 
@@ -291,42 +291,42 @@ func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.
 	if len(req.URLWildcardAny) > 0 {
 		urlExprs := make([]string, len(req.URLWildcardAny))
 		for i, pattern := range req.URLWildcardAny {
-			urlExprs[i] = fmt.Sprintf("(http.request.uri.path wildcard \"%s\")", r.sanitizeString(pattern))
+			urlExprs[i] = fmt.Sprintf("(http.request.uri wildcard \"%s\")", r.sanitizeString(pattern))
 		}
 		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
 	}
 	if len(req.URLStartsWithAny) > 0 {
 		urlExprs := make([]string, len(req.URLStartsWithAny))
 		for i, prefix := range req.URLStartsWithAny {
-			urlExprs[i] = fmt.Sprintf("(starts_with(http.request.uri.path, \"%s\"))", r.sanitizeString(prefix))
+			urlExprs[i] = fmt.Sprintf("(starts_with(http.request.uri, \"%s\"))", r.sanitizeString(prefix))
 		}
 		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
 	}
 	if len(req.URLEndsWithAny) > 0 {
 		urlExprs := make([]string, len(req.URLEndsWithAny))
 		for i, suffix := range req.URLEndsWithAny {
-			urlExprs[i] = fmt.Sprintf("(ends_with(http.request.uri.path, \"%s\"))", r.sanitizeString(suffix))
+			urlExprs[i] = fmt.Sprintf("(ends_with(http.request.uri, \"%s\"))", r.sanitizeString(suffix))
 		}
 		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
 	}
 	if len(req.URLContainsAny) > 0 {
 		urlExprs := make([]string, len(req.URLContainsAny))
 		for i, substring := range req.URLContainsAny {
-			urlExprs[i] = fmt.Sprintf("(contains(http.request.uri.path, \"%s\"))", r.sanitizeString(substring))
+			urlExprs[i] = fmt.Sprintf("(contains(http.request.uri, \"%s\"))", r.sanitizeString(substring))
 		}
 		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
 	}
 	if len(req.URLEqualsAny) > 0 {
 		urlExprs := make([]string, len(req.URLEqualsAny))
 		for i, path := range req.URLEqualsAny {
-			urlExprs[i] = fmt.Sprintf("(http.request.uri.path eq \"%s\")", r.sanitizeString(path))
+			urlExprs[i] = fmt.Sprintf("(http.request.uri eq \"%s\")", r.sanitizeString(path))
 		}
 		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
 	}
 	if len(req.URLMatchesAny) > 0 {
 		urlExprs := make([]string, len(req.URLMatchesAny))
 		for i, regex := range req.URLMatchesAny {
-			urlExprs[i] = fmt.Sprintf("(http.request.uri.path matches \"%s\")", r.sanitizeString(regex))
+			urlExprs[i] = fmt.Sprintf("(http.request.uri matches \"%s\")", r.sanitizeString(regex))
 		}
 		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(urlExprs, " or ")))
 	}

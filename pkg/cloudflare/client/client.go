@@ -138,34 +138,46 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 		return nil, fmt.Errorf("failed to get rate limit ruleset: %w", err)
 	}
 
-	// Create a new rate limiting rule with block action and ratelimit configuration
+	// Create a new rate limiting rule using BlockRuleParam but with dynamic action
+	// Note: Using BlockRuleParam as the base type but changing the action field dynamically
 	newRuleParams := []rulesets.PhaseUpdateParamsRuleUnion{
 		rulesets.BlockRuleParam{
-			Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+			Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
 			Description: cloudflare.F(rateLimit.Description),
 			Expression:  cloudflare.F(rateLimit.Expression),
 			Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
 				Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}), // Required by Cloudflare API
 				Period:            cloudflare.F(int64(rateLimit.Period)),
 				RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
-				MitigationTimeout: cloudflare.F(int64(rateLimit.Period)), // Block for the same period duration
+				MitigationTimeout: cloudflare.F(int64(rateLimit.Period)),
 			}),
 		},
 	}
 
-	// Add existing rules to preserve them
+	// Add existing rules to preserve them (with their rate limiting configuration)
 	for _, rule := range currentRuleset.Rules {
 		switch rule.Action {
 		case "block":
-			newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{
-				rulesets.BlockRuleParam{
-					ID:          cloudflare.F(rule.ID),
-					Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
-					Description: cloudflare.F(rule.Description),
-					Expression:  cloudflare.F(rule.Expression),
-				},
-			}, newRuleParams...)
-			// Add other rule types as needed for comprehensive support
+			blockRule := rulesets.BlockRuleParam{
+				ID:          cloudflare.F(rule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+				Description: cloudflare.F(rule.Description),
+				Expression:  cloudflare.F(rule.Expression),
+			}
+
+			// CRITICAL: Preserve the rate limiting configuration for existing rules
+			if rule.Ratelimit != nil {
+				if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
+					blockRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+						Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
+						Period:            cloudflare.F(existingRateLimit.Period),
+						RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
+						MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
+					})
+				}
+			}
+
+			newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{blockRule}, newRuleParams...)
 		}
 	}
 
@@ -191,7 +203,7 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 		Name:        rateLimit.Name,
 		Description: rateLimit.Description,
 		Expression:  rateLimit.Expression,
-		Action:      "block", // Using block action for rate limiting
+		Action:      rateLimit.Action, // Use the provided action (challenge, block, etc.)
 		Threshold:   rateLimit.Threshold,
 		Period:      rateLimit.Period,
 		Disabled:    rateLimit.Disabled,
@@ -237,10 +249,11 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 
 	for _, rule := range currentRuleset.Rules {
 		if rule.ID == rateLimitID {
-			// Replace the rule with updated version
+			// Replace the rule with updated version using the provided action
+			// Use BlockRuleParam as the base type but change the action dynamically
 			newRuleParams = append(newRuleParams, rulesets.BlockRuleParam{
 				ID:          cloudflare.F(rateLimitID),
-				Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+				Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
 				Description: cloudflare.F(rateLimit.Description),
 				Expression:  cloudflare.F(rateLimit.Expression),
 				Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
@@ -252,15 +265,29 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 			})
 			ruleFound = true
 		} else {
-			// Keep existing rule
+			// Keep existing rule (with its rate limiting configuration)
 			switch rule.Action {
 			case "block":
-				newRuleParams = append(newRuleParams, rulesets.BlockRuleParam{
+				blockRule := rulesets.BlockRuleParam{
 					ID:          cloudflare.F(rule.ID),
 					Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
 					Description: cloudflare.F(rule.Description),
 					Expression:  cloudflare.F(rule.Expression),
-				})
+				}
+
+				// CRITICAL: Preserve the rate limiting configuration for existing rules
+				if rule.Ratelimit != nil {
+					if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
+						blockRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+							Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
+							Period:            cloudflare.F(existingRateLimit.Period),
+							RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
+							MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
+						})
+					}
+				}
+
+				newRuleParams = append(newRuleParams, blockRule)
 			}
 		}
 	}
@@ -283,7 +310,7 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 		Name:        rateLimit.Name,
 		Description: rateLimit.Description,
 		Expression:  rateLimit.Expression,
-		Action:      "block",
+		Action:      rateLimit.Action, // Use the provided action (challenge, block, etc.)
 		Threshold:   rateLimit.Threshold,
 		Period:      rateLimit.Period,
 		Disabled:    rateLimit.Disabled,
@@ -319,15 +346,29 @@ func (c *CloudflareClient) DeleteRateLimit(ctx context.Context, zoneID, rateLimi
 			continue
 		}
 
-		// Keep existing rule
+		// Keep existing rule (with its rate limiting configuration)
 		switch rule.Action {
 		case "block":
-			newRuleParams = append(newRuleParams, rulesets.BlockRuleParam{
+			blockRule := rulesets.BlockRuleParam{
 				ID:          cloudflare.F(rule.ID),
 				Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
 				Description: cloudflare.F(rule.Description),
 				Expression:  cloudflare.F(rule.Expression),
-			})
+			}
+
+			// CRITICAL: Preserve the rate limiting configuration for remaining rules
+			if rule.Ratelimit != nil {
+				if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
+					blockRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+						Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
+						Period:            cloudflare.F(existingRateLimit.Period),
+						RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
+						MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
+					})
+				}
+			}
+
+			newRuleParams = append(newRuleParams, blockRule)
 		}
 	}
 
@@ -378,17 +419,24 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 			}
 
 			// Extract rate limit parameters from the ratelimit configuration
-			if rule.Action == "block" && rule.Ratelimit != nil {
-				rateLimit.Action = "block"
+			// NOTE: All actions (block, challenge, js_challenge, managed_challenge) can have rate limiting
+			if rule.Ratelimit != nil {
+				// Try to cast to different ratelimit struct types
+				extracted := false
 
-				// Try to cast to the actual BlockRuleRatelimit struct type
+				// Try BlockRuleRatelimit (for block actions)
 				if blockRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-					// Extract values from the structured type (fields are int64, not pointers)
 					rateLimit.Threshold = int(blockRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(blockRateLimit.Period)
+					extracted = true
+				} else if challengeRateLimit, ok := rule.Ratelimit.(rulesets.PhaseGetResponseRulesRulesetsChallengeRuleRatelimit); ok {
+					// Handle challenge action ratelimit type
+					rateLimit.Threshold = int(challengeRateLimit.RequestsPerPeriod)
+					rateLimit.Period = int(challengeRateLimit.Period)
+					extracted = true
 				} else {
 					// Try alternative: access via reflection or type assertion
-					fmt.Printf("DEBUG: rule.Ratelimit type: %T, trying alternative extraction\n", rule.Ratelimit)
+					fmt.Printf("DEBUG: rule.Ratelimit type: %T, trying reflection extraction\n", rule.Ratelimit)
 
 					// Fallback: try to extract via interface{} reflection
 					if rateLimitInterface, ok := rule.Ratelimit.(interface {
@@ -397,18 +445,20 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 					}); ok {
 						if reqsPerPeriod := rateLimitInterface.GetRequestsPerPeriod(); reqsPerPeriod != nil {
 							rateLimit.Threshold = int(*reqsPerPeriod)
+							extracted = true
 						}
 						if period := rateLimitInterface.GetPeriod(); period != nil {
 							rateLimit.Period = int(*period)
+							extracted = true
 						}
 					}
 				}
 
 				// Set defaults if extraction failed
-				if rateLimit.Threshold == 0 {
+				if !extracted || rateLimit.Threshold == 0 {
 					rateLimit.Threshold = 100
 				}
-				if rateLimit.Period == 0 {
+				if !extracted || rateLimit.Period == 0 {
 					rateLimit.Period = 60
 				}
 			} else {
@@ -449,11 +499,8 @@ func (c *CloudflareClient) ListRateLimits(ctx context.Context, zoneID string) ([
 			Action:      string(rule.Action),
 		}
 
-		// Extract rate limit parameters if available
-		if rule.Action == "block" {
-			// For block rules with rate limiting, extract the rate limit config
-			rateLimit.Action = "block"
-		}
+		// Extract rate limit parameters if available and set the actual action
+		rateLimit.Action = string(rule.Action) // Use the actual action from Cloudflare (block, challenge, etc.)
 
 		rateLimits = append(rateLimits, rateLimit)
 	}

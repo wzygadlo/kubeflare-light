@@ -520,49 +520,405 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 		return nil, fmt.Errorf("action cannot be empty")
 	}
 
-	// TODO: Implement with correct v4.5.1 rulesets API for custom firewall rules
-	return &FirewallRule{
-		ID:          fmt.Sprintf("fw_%s_%d", zoneID[:8], rule.Priority),
-		Name:        rule.Name,
-		Description: rule.Description,
-		Expression:  rule.Expression,
-		Action:      rule.Action,
-		Priority:    rule.Priority,
-		Paused:      rule.Paused,
-	}, nil
+	// Get the http_request_firewall_custom phase ruleset for the zone
+	phase := rulesets.PhaseHTTPRequestFirewallCustom
+	currentRuleset, err := c.client.Rulesets.Phases.Get(ctx, phase, rulesets.PhaseGetParams{
+		ZoneID: cloudflare.F(zoneID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get firewall custom ruleset: %w", err)
+	}
+
+	// Create new WAF rule based on action type
+	var newRuleParam rulesets.PhaseUpdateParamsRuleUnion
+	
+	switch rule.Action {
+	case "block":
+		newRuleParam = rulesets.BlockRuleParam{
+			Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+			Description: cloudflare.F(rule.Description),
+			Expression:  cloudflare.F(rule.Expression),
+		}
+	case "challenge":
+		// Use BlockRuleParam with challenge action
+		newRuleParam = rulesets.BlockRuleParam{
+			Action:      cloudflare.F(rulesets.BlockRuleAction("challenge")),
+			Description: cloudflare.F(rule.Description),
+			Expression:  cloudflare.F(rule.Expression),
+		}
+	case "js_challenge":
+		// Use BlockRuleParam with js_challenge action
+		newRuleParam = rulesets.BlockRuleParam{
+			Action:      cloudflare.F(rulesets.BlockRuleAction("js_challenge")),
+			Description: cloudflare.F(rule.Description),
+			Expression:  cloudflare.F(rule.Expression),
+		}
+	case "managed_challenge":
+		newRuleParam = rulesets.ManagedChallengeRuleParam{
+			Action:      cloudflare.F(rulesets.ManagedChallengeRuleActionManagedChallenge),
+			Description: cloudflare.F(rule.Description),
+			Expression:  cloudflare.F(rule.Expression),
+		}
+	case "log":
+		newRuleParam = rulesets.LogRuleParam{
+			Action:      cloudflare.F(rulesets.LogRuleActionLog),
+			Description: cloudflare.F(rule.Description),
+			Expression:  cloudflare.F(rule.Expression),
+		}
+	default:
+		return nil, fmt.Errorf("unsupported action: %s", rule.Action)
+	}
+
+	// Check for duplicate rules by description and expression
+	for _, existingRule := range currentRuleset.Rules {
+		if existingRule.Description == rule.Description && existingRule.Expression == rule.Expression {
+			// Rule already exists, return it instead of creating a duplicate
+			return &FirewallRule{
+				ID:          existingRule.ID,
+				Name:        rule.Name,
+				Description: existingRule.Description,
+				Expression:  existingRule.Expression,
+				Action:      string(existingRule.Action),
+				Priority:    rule.Priority,
+				Paused:      !existingRule.Enabled,
+			}, nil
+		}
+	}
+
+	// Collect existing rules to preserve them
+	var existingRules []rulesets.PhaseUpdateParamsRuleUnion
+	for _, existingRule := range currentRuleset.Rules {
+		// Re-create the rule parameter based on its action type to preserve it
+		var ruleParam rulesets.PhaseUpdateParamsRuleUnion
+		
+		switch existingRule.Action {
+		case "block":
+			ruleParam = rulesets.BlockRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		case "challenge":
+			ruleParam = rulesets.BlockRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleAction("challenge")),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		case "js_challenge":
+			ruleParam = rulesets.BlockRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleAction("js_challenge")),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		case "managed_challenge":
+			ruleParam = rulesets.ManagedChallengeRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.ManagedChallengeRuleActionManagedChallenge),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		case "log":
+			ruleParam = rulesets.LogRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.LogRuleActionLog),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		default:
+			// Skip unsupported rule types
+			continue
+		}
+		
+		existingRules = append(existingRules, ruleParam)
+	}
+
+	// Add the new rule to the beginning of the list (higher priority)
+	allRules := append([]rulesets.PhaseUpdateParamsRuleUnion{newRuleParam}, existingRules...)
+
+	// Update the ruleset with all rules (existing + new)
+	updatedRuleset, err := c.client.Rulesets.Phases.Update(ctx, phase, rulesets.PhaseUpdateParams{
+		ZoneID: cloudflare.F(zoneID),
+		Rules:  cloudflare.F(allRules),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to update firewall custom ruleset: %w", err)
+	}
+
+	// Find the newly created rule (it should be the first one since we added it first)
+	if len(updatedRuleset.Rules) > 0 {
+		newRule := updatedRuleset.Rules[0]
+		return &FirewallRule{
+			ID:          newRule.ID,
+			Name:        rule.Name,
+			Description: newRule.Description,
+			Expression:  newRule.Expression,
+			Action:      string(newRule.Action),
+			Priority:    rule.Priority, // Keep original priority
+			Paused:      !newRule.Enabled,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("failed to find created firewall rule in response")
 }
 
 // UpdateFirewallRule updates an existing firewall rule
-func (c *CloudflareClient) UpdateFirewallRule(ctx context.Context, zoneID, rulesetID string, rule FirewallRule) (*FirewallRule, error) {
+func (c *CloudflareClient) UpdateFirewallRule(ctx context.Context, zoneID, ruleID string, rule FirewallRule) (*FirewallRule, error) {
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
-	if rulesetID == "" {
-		return nil, fmt.Errorf("ruleset ID cannot be empty")
+	if ruleID == "" {
+		return nil, fmt.Errorf("rule ID cannot be empty")
 	}
 
-	// TODO: Implement with correct v4.5.1 rulesets API for custom firewall rules
-	return &FirewallRule{
-		ID:          rulesetID,
-		Name:        rule.Name,
-		Description: rule.Description,
-		Expression:  rule.Expression,
-		Action:      rule.Action,
-		Priority:    rule.Priority,
-		Paused:      rule.Paused,
-	}, nil
+	// Get the http_request_firewall_custom phase ruleset for the zone
+	phase := rulesets.PhaseHTTPRequestFirewallCustom
+	currentRuleset, err := c.client.Rulesets.Phases.Get(ctx, phase, rulesets.PhaseGetParams{
+		ZoneID: cloudflare.F(zoneID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get firewall custom ruleset: %w", err)
+	}
+
+	// Find the rule to update and preserve other rules
+	var allRules []rulesets.PhaseUpdateParamsRuleUnion
+	var targetRuleFound bool
+	
+	for _, existingRule := range currentRuleset.Rules {
+		var ruleParam rulesets.PhaseUpdateParamsRuleUnion
+		
+		if existingRule.ID == ruleID {
+			// This is the rule we want to update
+			targetRuleFound = true
+			
+			switch rule.Action {
+			case "block":
+				ruleParam = rulesets.BlockRuleParam{
+					ID:          cloudflare.F(ruleID),
+					Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+					Description: cloudflare.F(rule.Description),
+					Expression:  cloudflare.F(rule.Expression),
+					Enabled:     cloudflare.F(!rule.Paused),
+				}
+			case "challenge":
+				ruleParam = rulesets.BlockRuleParam{
+					ID:          cloudflare.F(ruleID),
+					Action:      cloudflare.F(rulesets.BlockRuleAction("challenge")),
+					Description: cloudflare.F(rule.Description),
+					Expression:  cloudflare.F(rule.Expression),
+					Enabled:     cloudflare.F(!rule.Paused),
+				}
+			case "js_challenge":
+				ruleParam = rulesets.BlockRuleParam{
+					ID:          cloudflare.F(ruleID),
+					Action:      cloudflare.F(rulesets.BlockRuleAction("js_challenge")),
+					Description: cloudflare.F(rule.Description),
+					Expression:  cloudflare.F(rule.Expression),
+					Enabled:     cloudflare.F(!rule.Paused),
+				}
+			case "managed_challenge":
+				ruleParam = rulesets.ManagedChallengeRuleParam{
+					ID:          cloudflare.F(ruleID),
+					Action:      cloudflare.F(rulesets.ManagedChallengeRuleActionManagedChallenge),
+					Description: cloudflare.F(rule.Description),
+					Expression:  cloudflare.F(rule.Expression),
+					Enabled:     cloudflare.F(!rule.Paused),
+				}
+			case "log":
+				ruleParam = rulesets.LogRuleParam{
+					ID:          cloudflare.F(ruleID),
+					Action:      cloudflare.F(rulesets.LogRuleActionLog),
+					Description: cloudflare.F(rule.Description),
+					Expression:  cloudflare.F(rule.Expression),
+					Enabled:     cloudflare.F(!rule.Paused),
+				}
+			default:
+				return nil, fmt.Errorf("unsupported action: %s", rule.Action)
+			}
+		} else {
+			// Preserve other existing rules
+			switch existingRule.Action {
+			case "block":
+				ruleParam = rulesets.BlockRuleParam{
+					ID:          cloudflare.F(existingRule.ID),
+					Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+					Description: cloudflare.F(existingRule.Description),
+					Expression:  cloudflare.F(existingRule.Expression),
+					Enabled:     cloudflare.F(existingRule.Enabled),
+				}
+			case "challenge":
+				ruleParam = rulesets.BlockRuleParam{
+					ID:          cloudflare.F(existingRule.ID),
+					Action:      cloudflare.F(rulesets.BlockRuleAction("challenge")),
+					Description: cloudflare.F(existingRule.Description),
+					Expression:  cloudflare.F(existingRule.Expression),
+					Enabled:     cloudflare.F(existingRule.Enabled),
+				}
+			case "js_challenge":
+				ruleParam = rulesets.BlockRuleParam{
+					ID:          cloudflare.F(existingRule.ID),
+					Action:      cloudflare.F(rulesets.BlockRuleAction("js_challenge")),
+					Description: cloudflare.F(existingRule.Description),
+					Expression:  cloudflare.F(existingRule.Expression),
+					Enabled:     cloudflare.F(existingRule.Enabled),
+				}
+			case "managed_challenge":
+				ruleParam = rulesets.ManagedChallengeRuleParam{
+					ID:          cloudflare.F(existingRule.ID),
+					Action:      cloudflare.F(rulesets.ManagedChallengeRuleActionManagedChallenge),
+					Description: cloudflare.F(existingRule.Description),
+					Expression:  cloudflare.F(existingRule.Expression),
+					Enabled:     cloudflare.F(existingRule.Enabled),
+				}
+			case "log":
+				ruleParam = rulesets.LogRuleParam{
+					ID:          cloudflare.F(existingRule.ID),
+					Action:      cloudflare.F(rulesets.LogRuleActionLog),
+					Description: cloudflare.F(existingRule.Description),
+					Expression:  cloudflare.F(existingRule.Expression),
+					Enabled:     cloudflare.F(existingRule.Enabled),
+				}
+			default:
+				// Skip unsupported rule types
+				continue
+			}
+		}
+		
+		allRules = append(allRules, ruleParam)
+	}
+
+	if !targetRuleFound {
+		return nil, fmt.Errorf("firewall rule with ID %s not found", ruleID)
+	}
+
+	// Update the ruleset with all rules (existing + updated)
+	updatedRuleset, err := c.client.Rulesets.Phases.Update(ctx, phase, rulesets.PhaseUpdateParams{
+		ZoneID: cloudflare.F(zoneID),
+		Rules:  cloudflare.F(allRules),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to update firewall custom ruleset: %w", err)
+	}
+
+	// Find the updated rule in the response
+	for _, updatedRule := range updatedRuleset.Rules {
+		if updatedRule.ID == ruleID {
+			return &FirewallRule{
+				ID:          updatedRule.ID,
+				Name:        rule.Name,
+				Description: updatedRule.Description,
+				Expression:  updatedRule.Expression,
+				Action:      string(updatedRule.Action),
+				Priority:    rule.Priority, // Keep original priority
+				Paused:      !updatedRule.Enabled,
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to find updated firewall rule in response")
 }
 
 // DeleteFirewallRule deletes a firewall rule
-func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, rulesetID string) error {
+func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleID string) error {
 	if zoneID == "" {
 		return fmt.Errorf("zone ID cannot be empty")
 	}
-	if rulesetID == "" {
-		return fmt.Errorf("ruleset ID cannot be empty")
+	if ruleID == "" {
+		return fmt.Errorf("rule ID cannot be empty")
 	}
 
-	// TODO: Implement with correct v4.5.1 rulesets API for custom firewall rules
+	// Get the http_request_firewall_custom phase ruleset for the zone
+	phase := rulesets.PhaseHTTPRequestFirewallCustom
+	currentRuleset, err := c.client.Rulesets.Phases.Get(ctx, phase, rulesets.PhaseGetParams{
+		ZoneID: cloudflare.F(zoneID),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get firewall custom ruleset: %w", err)
+	}
+
+	// Build new rules list without the rule to delete
+	var remainingRules []rulesets.PhaseUpdateParamsRuleUnion
+	var targetRuleFound bool
+	
+	for _, existingRule := range currentRuleset.Rules {
+		if existingRule.ID == ruleID {
+			// Skip this rule (delete it)
+			targetRuleFound = true
+			continue
+		}
+
+		// Preserve all other existing rules
+		var ruleParam rulesets.PhaseUpdateParamsRuleUnion
+		
+		switch existingRule.Action {
+		case "block":
+			ruleParam = rulesets.BlockRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		case "challenge":
+			ruleParam = rulesets.BlockRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleAction("challenge")),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		case "js_challenge":
+			ruleParam = rulesets.BlockRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleAction("js_challenge")),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		case "managed_challenge":
+			ruleParam = rulesets.ManagedChallengeRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.ManagedChallengeRuleActionManagedChallenge),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		case "log":
+			ruleParam = rulesets.LogRuleParam{
+				ID:          cloudflare.F(existingRule.ID),
+				Action:      cloudflare.F(rulesets.LogRuleActionLog),
+				Description: cloudflare.F(existingRule.Description),
+				Expression:  cloudflare.F(existingRule.Expression),
+				Enabled:     cloudflare.F(existingRule.Enabled),
+			}
+		default:
+			// Skip unsupported rule types
+			continue
+		}
+		
+		remainingRules = append(remainingRules, ruleParam)
+	}
+
+	if !targetRuleFound {
+		return fmt.Errorf("firewall rule with ID %s not found", ruleID)
+	}
+
+	// Update the ruleset without the deleted rule
+	_, err = c.client.Rulesets.Phases.Update(ctx, phase, rulesets.PhaseUpdateParams{
+		ZoneID: cloudflare.F(zoneID),
+		Rules:  cloudflare.F(remainingRules),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete firewall rule: %w", err)
+	}
+
 	return nil
 }
 

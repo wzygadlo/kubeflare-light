@@ -17,6 +17,7 @@ import (
 
 	cloudflareV1alpha1 "github.com/wzygadlo/kubeflare-light/pkg/apis/cloudflare/v1alpha1"
 	cfclient "github.com/wzygadlo/kubeflare-light/pkg/cloudflare/client"
+	"github.com/wzygadlo/kubeflare-light/pkg/utils"
 )
 
 const wafRuleFinalizer = "cloudflare.io/wafrule-finalizer"
@@ -27,6 +28,7 @@ type WAFRuleReconciler struct {
 	Log               logr.Logger
 	Scheme            *runtime.Scheme
 	CF                *cfclient.CloudflareClient
+	ZoneResolver      *utils.ZoneResolver
 	ReconcileInterval time.Duration
 	ErrorInterval     time.Duration
 }
@@ -53,6 +55,7 @@ func SetupWAFRuleController(mgr ctrl.Manager) error {
 			Log:               log.Log.WithName("controllers").WithName("WAFRule"),
 			Scheme:            mgr.GetScheme(),
 			CF:                cfClient,
+			ZoneResolver:      utils.NewZoneResolver(mgr.GetClient()),
 			ReconcileInterval: reconcileInterval,
 			ErrorInterval:     errorInterval,
 		})
@@ -113,12 +116,21 @@ func (r *WAFRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloudflareV1alpha1.WAFRule) (ctrl.Result, error) {
 	log := r.Log.WithValues("wafrule", wafRule.Name)
 
+	// Resolve zone ID from ConfigMap if needed
+	zoneID, err := r.ZoneResolver.ResolveZoneID(ctx, wafRule.Spec.ZoneID)
+	if err != nil {
+		log.Error(err, "Failed to resolve zone ID")
+		r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, "ZoneResolutionFailed", err.Error())
+		r.Status().Update(ctx, wafRule)
+		return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
+	}
+
 	// Convert Kubernetes WAFRule to Cloudflare WAF Rule
 	cfWAFRule := r.convertToCloudflareWAFRule(wafRule)
 
 	if wafRule.Status.CloudflareID == "" {
 		// Create new WAF rule in Cloudflare
-		createdRule, err := r.CF.CreateFirewallRule(ctx, wafRule.Spec.ZoneID, cfWAFRule)
+		createdRule, err := r.CF.CreateFirewallRule(ctx, zoneID, cfWAFRule)
 		if err != nil {
 			log.Error(err, "Failed to create WAF rule in Cloudflare")
 			r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, "CreateFailed", err.Error())
@@ -134,7 +146,7 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 		log.Info("Created WAF rule in Cloudflare", "cloudflareId", createdRule.ID)
 	} else {
 		// Update existing WAF rule in Cloudflare
-		_, err := r.CF.UpdateFirewallRule(ctx, wafRule.Spec.ZoneID, wafRule.Status.CloudflareID, cfWAFRule)
+		_, err := r.CF.UpdateFirewallRule(ctx, zoneID, wafRule.Status.CloudflareID, cfWAFRule)
 		if err != nil {
 			log.Error(err, "Failed to update WAF rule in Cloudflare")
 			r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, "UpdateFailed", err.Error())
@@ -149,7 +161,7 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 	}
 
 	// Update status
-	err := r.Status().Update(ctx, wafRule)
+	err = r.Status().Update(ctx, wafRule)
 	if err != nil {
 		log.Error(err, "Failed to update WAFRule status")
 		return ctrl.Result{}, err
@@ -162,7 +174,14 @@ func (r *WAFRuleReconciler) finalizeWAFRule(ctx context.Context, wafRule *cloudf
 	log := r.Log.WithValues("wafrule", wafRule.Name)
 
 	if wafRule.Status.CloudflareID != "" {
-		err := r.CF.DeleteFirewallRule(ctx, wafRule.Spec.ZoneID, wafRule.Status.CloudflareID)
+		// Resolve zone ID from ConfigMap if needed
+		zoneID, err := r.ZoneResolver.ResolveZoneID(ctx, wafRule.Spec.ZoneID)
+		if err != nil {
+			log.Error(err, "Failed to resolve zone ID during cleanup")
+			return err
+		}
+
+		err = r.CF.DeleteFirewallRule(ctx, zoneID, wafRule.Status.CloudflareID)
 		if err != nil {
 			log.Error(err, "Failed to delete WAF rule from Cloudflare")
 			return err

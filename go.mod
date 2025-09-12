@@ -6,6 +6,7 @@ require (
 	github.com/cloudflare/cloudflare-go/v4 v4.5.1
 	github.com/go-logr/logr v1.3.0
 	github.com/stretchr/testify v1.8.4
+	go.uber.org/zap v1.25.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.29.0
 	k8s.io/apimachinery v0.29.0
@@ -52,7 +53,6 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.25.0 // indirect
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
 	golang.org/x/net v0.31.0 // indirect
 	golang.org/x/oauth2 v0.10.0 // indirect

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"net/http"
 	"os"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -11,6 +12,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"go.uber.org/zap/zapcore"
 
 	cloudflareV1alpha1 "github.com/wzygadlo/kubeflare-light/pkg/apis/cloudflare/v1alpha1"
 	"github.com/wzygadlo/kubeflare-light/pkg/controller"
@@ -36,7 +38,30 @@ func main() {
 		"Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	// Configure logging level based on environment variable or default to info
+	logLevel := strings.ToLower(os.Getenv("LOG_LEVEL"))
+	var zapLevel zapcore.Level
+	var devMode bool
+	
+	switch logLevel {
+	case "debug":
+		zapLevel = zapcore.DebugLevel
+		devMode = true
+	case "info", "":
+		zapLevel = zapcore.InfoLevel
+		devMode = false
+	case "warn", "warning":
+		zapLevel = zapcore.WarnLevel
+		devMode = false
+	case "error":
+		zapLevel = zapcore.ErrorLevel
+		devMode = false
+	default:
+		zapLevel = zapcore.InfoLevel
+		devMode = false
+	}
+
+	ctrl.SetLogger(zap.New(zap.UseDevMode(devMode), zap.Level(zapLevel)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,

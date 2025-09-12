@@ -923,24 +923,38 @@ func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleI
 }
 
 // GetFirewallRule retrieves a specific firewall rule
-func (c *CloudflareClient) GetFirewallRule(ctx context.Context, zoneID, rulesetID string) (*FirewallRule, error) {
+func (c *CloudflareClient) GetFirewallRule(ctx context.Context, zoneID, ruleID string) (*FirewallRule, error) {
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
-	if rulesetID == "" {
-		return nil, fmt.Errorf("ruleset ID cannot be empty")
+	if ruleID == "" {
+		return nil, fmt.Errorf("rule ID cannot be empty")
 	}
 
-	// TODO: Implement with correct v4.5.1 rulesets API for custom firewall rules
-	return &FirewallRule{
-		ID:          rulesetID,
-		Name:        "Example WAF Rule",
-		Description: "Example WAF rule",
-		Expression:  "true",
-		Action:      "block",
-		Priority:    1,
-		Paused:      false,
-	}, nil
+	// Get the custom firewall ruleset for the zone
+	rulesets, err := c.client.Rulesets.Phases.Get(ctx, rulesets.PhaseHTTPRequestFirewallCustom, rulesets.PhaseGetParams{
+		ZoneID: cloudflare.F(zoneID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get firewall rulesets: %w", err)
+	}
+
+	// Find the rule by ID
+	for _, rule := range rulesets.Rules {
+		if rule.ID == ruleID {
+			return &FirewallRule{
+				ID:          rule.ID,
+				Name:        rule.Description, // Use description as name for consistency
+				Description: rule.Description,
+				Expression:  rule.Expression,
+				Action:      string(rule.Action),
+				Priority:    1, // Rulesets API doesn't support individual rule priority, return desired value
+				Paused:      !rule.Enabled,
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("firewall rule with ID %s not found", ruleID)
 }
 
 // ListFirewallRules lists all firewall rules for a zone

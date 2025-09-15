@@ -1,4 +1,4 @@
-apiVersion: cloudflare.io/v1alpha1
+apiVersion: cloudflare.kubeflare.io/v1alpha1
 kind: RateLimit
 metadata:
   name: api-rate-limit

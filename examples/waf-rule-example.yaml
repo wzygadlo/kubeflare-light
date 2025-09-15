@@ -1,4 +1,4 @@
-apiVersion: cloudflare.io/v1alpha1
+apiVersion: cloudflare.kubeflare.io/v1alpha1
 kind: WAFRule
 metadata:
   name: block-malicious-ips
@@ -16,7 +16,7 @@ spec:
       contentType: "application/json"
       content: '{"error": "Access denied", "reason": "Your IP has been blocked due to suspicious activity"}'
 ---
-apiVersion: cloudflare.io/v1alpha1
+apiVersion: cloudflare.kubeflare.io/v1alpha1
 kind: WAFRule
 metadata:
   name: challenge-suspicious-requests

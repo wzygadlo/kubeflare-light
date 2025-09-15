@@ -89,6 +89,7 @@ metadata:
   namespace: production
 spec:
   zoneId: "example.com"  # Resolved via ConfigMap
+  description: "Rate limit for API endpoints"
   match:
     request:
       urlStartsWith: "/api/v1"
@@ -108,6 +109,7 @@ metadata:
   name: auth-endpoints-limit  # Name used for Cloudflare alignment
 spec:
   zoneId: "auth.example.com"
+  description: "Rate limit for authentication endpoints"
   match:
     request:
       urlStartsWithAny:
@@ -129,6 +131,7 @@ metadata:
   name: bot-protection  # Name synced to Cloudflare
 spec:
   zoneId: "api.example.com"
+  description: "Bot protection for API endpoints"
   match:
     request:
       urlWildcard: "/api/*"
@@ -157,6 +160,7 @@ metadata:
   name: comprehensive-protection
 spec:
   zoneId: "production.example.com"
+  description: "Comprehensive protection with all features"
   match:
     request:
       # URL matching with multiple patterns
@@ -393,7 +397,7 @@ kubectl logs -f -n kubeflare-light-system deployment/kubeflare-light-controller-
 - `zoneId` - Domain name or Cloudflare zone ID (resolved via ConfigMap)
 - `threshold` - Requests per period (1-1000000)
 - `period` - Time period in seconds (10, 60, 120, 300, 600, 3600)
-- `action.mode` - Action to take: "block", "challenge", "js_challenge", "log"
+- `action.mode` - Action to take: "simulate", "block", "challenge", "js_challenge", "managed_challenge"
 - `disabled` - Whether the rule is disabled (default: false)
 
 #### URL Matching (Choose One or Combine with Arrays)
@@ -478,7 +482,7 @@ kubectl logs -f -n kubeflare-light-system deployment/kubeflare-light-controller-
 ```bash
 git clone https://github.com/wzygadlo/kubeflare-light
 cd kubeflare-light
-make deps
+make tidy
 make test
 ```
 

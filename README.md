@@ -3,6 +3,8 @@
 
 A Kubernetes controller that manages Cloudflare security resources (rate limits and WAF rules) through Custom Resource Definitions (CRDs).
 
+> **Note**: This project is based on the original Kubeflare but has been refactored with all features removed and improved focus on rate limits and WAF rules. For additional features, contact wzygadlo@outlook.com
+
 ## Features
 
 - **Drift Detection**: Automatically recreates rules deleted from Cloudflare dashboard

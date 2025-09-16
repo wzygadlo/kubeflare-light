@@ -146,7 +146,7 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		cfRateLimit.Action = rateLimit.Spec.Action.Mode // block, challenge, js_challenge, log
 	}
 
-	// Build comprehensive expression using all available operators
+	// Build expression using available operators
 	if rateLimit.Spec.Match != nil && rateLimit.Spec.Match.Request != nil {
 		cfRateLimit.Expression = r.buildCloudflareExpression(rateLimit.Spec.Match.Request)
 	}
@@ -248,7 +248,7 @@ func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *
 	return nil
 }
 
-// buildCloudflareExpression builds a comprehensive Cloudflare expression from CRD fields
+// buildCloudflareExpression builds a Cloudflare expression from CRD fields
 // Uses official 2025 Cloudflare operators and syntax with proper input sanitization
 func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.RateLimitMatchRequest) string {
 	var expressions []string

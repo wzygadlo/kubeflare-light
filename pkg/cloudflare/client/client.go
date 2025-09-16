@@ -44,8 +44,6 @@ type FirewallRule struct {
 type Zone = zones.Zone
 
 // CloudflareClientInterface defines the contract for Cloudflare API operations.
-// Following Go best practices: "accept interfaces, return structs"
-// This interface enables dependency injection and mocking for testing.
 type CloudflareClientInterface interface {
 	// Token and Zone operations
 	VerifyToken(ctx context.Context) error

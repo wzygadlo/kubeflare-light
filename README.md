@@ -1,9 +1,5 @@
 # kubeflare-light
 
-[![Go Version](https://img.shields.io/badge/Go-1.24+-blue.svg)](https://golang.org/)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.19+-blue.svg)](https://kubernetes.io/)
-[![Cloudflare API](https://img.shields.io/badge/Cloudflare%20API-v4.5.1-orange.svg)](https://developers.cloudflare.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 A Kubernetes controller that manages Cloudflare security resources (rate limits and WAF rules) through Custom Resource Definitions (CRDs).
 

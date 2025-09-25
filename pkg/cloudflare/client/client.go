@@ -143,6 +143,7 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 			Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
 			Description: cloudflare.F(rateLimit.Description),
 			Expression:  cloudflare.F(rateLimit.Expression),
+			Enabled:     cloudflare.F(!rateLimit.Disabled), // CRITICAL: Enabled field is required
 			Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
 				Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}), // Required by Cloudflare API
 				Period:            cloudflare.F(int64(rateLimit.Period)),
@@ -154,113 +155,51 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 
 	// Add existing rules to preserve them (with their rate limiting configuration)
 	for _, rule := range currentRuleset.Rules {
-		switch rule.Action {
-		case "block":
-			blockRule := rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rule.ID),
-				Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
-				Description: cloudflare.F(rule.Description),
-				Expression:  cloudflare.F(rule.Expression),
-			}
-
-			// CRITICAL: Preserve the rate limiting configuration for existing rules
-			if rule.Ratelimit != nil {
-				if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-					blockRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-						Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-						Period:            cloudflare.F(existingRateLimit.Period),
-						RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-						MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-					})
-				}
-			}
-
-			newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{blockRule}, newRuleParams...)
-		case "challenge":
-			challengeRule := rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rule.ID),
-				Action:      cloudflare.F(rulesets.BlockRuleAction("challenge")),
-				Description: cloudflare.F(rule.Description),
-				Expression:  cloudflare.F(rule.Expression),
-			}
-
-			// CRITICAL: Preserve the rate limiting configuration
-			if rule.Ratelimit != nil {
-				if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-					challengeRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-						Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-						Period:            cloudflare.F(existingRateLimit.Period),
-						RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-						MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-					})
-				}
-			}
-
-			newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{challengeRule}, newRuleParams...)
-		case "js_challenge":
-			jsChallengeRule := rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rule.ID),
-				Action:      cloudflare.F(rulesets.BlockRuleAction("js_challenge")),
-				Description: cloudflare.F(rule.Description),
-				Expression:  cloudflare.F(rule.Expression),
-			}
-
-			// CRITICAL: Preserve the rate limiting configuration
-			if rule.Ratelimit != nil {
-				if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-					jsChallengeRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-						Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-						Period:            cloudflare.F(existingRateLimit.Period),
-						RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-						MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-					})
-				}
-			}
-
-			newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{jsChallengeRule}, newRuleParams...)
-		case "managed_challenge":
-			managedChallengeRule := rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rule.ID),
-				Action:      cloudflare.F(rulesets.BlockRuleAction("managed_challenge")),
-				Description: cloudflare.F(rule.Description),
-				Expression:  cloudflare.F(rule.Expression),
-			}
-
-			// CRITICAL: Preserve the rate limiting configuration
-			if rule.Ratelimit != nil {
-				if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-					managedChallengeRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-						Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-						Period:            cloudflare.F(existingRateLimit.Period),
-						RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-						MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-					})
-				}
-			}
-
-			newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{managedChallengeRule}, newRuleParams...)
-		case "log":
-			logRule := rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rule.ID),
-				Action:      cloudflare.F(rulesets.BlockRuleAction("log")),
-				Description: cloudflare.F(rule.Description),
-				Expression:  cloudflare.F(rule.Expression),
-			}
-
-			// CRITICAL: Preserve the rate limiting configuration
-			if rule.Ratelimit != nil {
-				if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-					logRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-						Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-						Period:            cloudflare.F(existingRateLimit.Period),
-						RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-						MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-					})
-				}
-			}
-
-			newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{logRule}, newRuleParams...)
+		// ALL rules in http_ratelimit phase MUST have ratelimit configuration
+		// Skip any rules that don't have ratelimit (they shouldn't exist, but safety check)
+		if rule.Ratelimit == nil {
+			continue // Skip rules without ratelimit configuration
 		}
+
+		// All rate limiting rules use the same consistent structure regardless of action type
+		// Based on official Cloudflare documentation: https://developers.cloudflare.com/waf/rate-limiting-rules/create-api/
+		ruleParam := rulesets.BlockRuleParam{
+			ID:          cloudflare.F(rule.ID),
+			Action:      cloudflare.F(rulesets.BlockRuleAction(rule.Action)),
+			Description: cloudflare.F(rule.Description),
+			Expression:  cloudflare.F(rule.Expression),
+			Enabled:     cloudflare.F(rule.Enabled), // CRITICAL: Preserve the enabled state
+		}
+
+		// CRITICAL: ALL rules in http_ratelimit phase MUST have ratelimit configuration
+		// Try multiple type assertions to handle different action types
+		rateLimitExtracted := false
+		
+		// Try BlockRuleRatelimit (for block actions)
+		if blockRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
+			ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+				Characteristics:   cloudflare.F(blockRateLimit.Characteristics),
+				Period:            cloudflare.F(blockRateLimit.Period),
+				RequestsPerPeriod: cloudflare.F(blockRateLimit.RequestsPerPeriod),
+				MitigationTimeout: cloudflare.F(blockRateLimit.MitigationTimeout),
+			})
+			rateLimitExtracted = true
+		}
+		
+		// If we couldn't extract the ratelimit config, use safe defaults
+		// This ensures ALL rules have ratelimit configuration
+		if !rateLimitExtracted {
+			// Use default ratelimit configuration to ensure the rule is valid
+			// These defaults match common rate limit settings
+			ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+				Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}),
+				Period:            cloudflare.F(int64(60)),
+				RequestsPerPeriod: cloudflare.F(int64(100)),
+				MitigationTimeout: cloudflare.F(int64(60)),
+			})
+		}
+
+		newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{ruleParam}, newRuleParams...)
 	}
 
 	// Update the ruleset with the new rule
@@ -338,6 +277,7 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 				Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
 				Description: cloudflare.F(rateLimit.Description),
 				Expression:  cloudflare.F(rateLimit.Expression),
+				Enabled:     cloudflare.F(!rateLimit.Disabled), // CRITICAL: Enabled field is required
 				Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
 					Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}), // Required by Cloudflare API
 					Period:            cloudflare.F(int64(rateLimit.Period)),
@@ -348,29 +288,46 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 			ruleFound = true
 		} else {
 			// Keep existing rule (with its rate limiting configuration)
-			switch rule.Action {
-			case "block":
-				blockRule := rulesets.BlockRuleParam{
-					ID:          cloudflare.F(rule.ID),
-					Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
-					Description: cloudflare.F(rule.Description),
-					Expression:  cloudflare.F(rule.Expression),
-				}
-
-				// CRITICAL: Preserve the rate limiting configuration for existing rules
-				if rule.Ratelimit != nil {
-					if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-						blockRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-							Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-							Period:            cloudflare.F(existingRateLimit.Period),
-							RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-							MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-						})
-					}
-				}
-
-				newRuleParams = append(newRuleParams, blockRule)
+			// ALL rules in http_ratelimit phase MUST have ratelimit configuration
+			if rule.Ratelimit == nil {
+				continue // Skip rules without ratelimit configuration (shouldn't exist)
 			}
+
+			// Use consistent rule structure regardless of action type
+			ruleParam := rulesets.BlockRuleParam{
+				ID:          cloudflare.F(rule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleAction(rule.Action)),
+				Description: cloudflare.F(rule.Description),
+				Expression:  cloudflare.F(rule.Expression),
+				Enabled:     cloudflare.F(rule.Enabled), // CRITICAL: Preserve the enabled state
+			}
+
+			// CRITICAL: ALL rules in http_ratelimit phase MUST have ratelimit configuration
+			rateLimitExtracted := false
+
+			// Try BlockRuleRatelimit (for block/challenge actions)
+			if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
+				ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+					Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
+					Period:            cloudflare.F(existingRateLimit.Period),
+					RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
+					MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
+				})
+				rateLimitExtracted = true
+			}
+
+			// If we couldn't extract the ratelimit config, use safe defaults
+			if !rateLimitExtracted {
+				// Use default ratelimit configuration to ensure the rule is valid
+				ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+					Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}),
+					Period:            cloudflare.F(int64(60)),
+					RequestsPerPeriod: cloudflare.F(int64(100)),
+					MitigationTimeout: cloudflare.F(int64(60)),
+				})
+			}
+
+			newRuleParams = append(newRuleParams, ruleParam)
 		}
 	}
 
@@ -429,29 +386,46 @@ func (c *CloudflareClient) DeleteRateLimit(ctx context.Context, zoneID, rateLimi
 		}
 
 		// Keep existing rule (with its rate limiting configuration)
-		switch rule.Action {
-		case "block":
-			blockRule := rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rule.ID),
-				Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
-				Description: cloudflare.F(rule.Description),
-				Expression:  cloudflare.F(rule.Expression),
-			}
-
-			// CRITICAL: Preserve the rate limiting configuration for remaining rules
-			if rule.Ratelimit != nil {
-				if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-					blockRule.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-						Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-						Period:            cloudflare.F(existingRateLimit.Period),
-						RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-						MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-					})
-				}
-			}
-
-			newRuleParams = append(newRuleParams, blockRule)
+		// ALL rules in http_ratelimit phase MUST have ratelimit configuration
+		if rule.Ratelimit == nil {
+			continue // Skip rules without ratelimit configuration (shouldn't exist)
 		}
+
+		// Use consistent rule structure regardless of action type
+		ruleParam := rulesets.BlockRuleParam{
+			ID:          cloudflare.F(rule.ID),
+			Action:      cloudflare.F(rulesets.BlockRuleAction(rule.Action)),
+			Description: cloudflare.F(rule.Description),
+			Expression:  cloudflare.F(rule.Expression),
+			Enabled:     cloudflare.F(rule.Enabled), // CRITICAL: Preserve the enabled state
+		}
+
+		// CRITICAL: ALL rules in http_ratelimit phase MUST have ratelimit configuration
+		rateLimitExtracted := false
+
+		// Try BlockRuleRatelimit (for block/challenge actions)
+		if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
+			ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+				Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
+				Period:            cloudflare.F(existingRateLimit.Period),
+				RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
+				MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
+			})
+			rateLimitExtracted = true
+		}
+
+		// If we couldn't extract the ratelimit config, use safe defaults
+		if !rateLimitExtracted {
+			// Use default ratelimit configuration to ensure the rule is valid
+			ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+				Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}),
+				Period:            cloudflare.F(int64(60)),
+				RequestsPerPeriod: cloudflare.F(int64(100)),
+				MitigationTimeout: cloudflare.F(int64(60)),
+			})
+		}
+
+		newRuleParams = append(newRuleParams, ruleParam)
 	}
 
 	if !ruleFound {

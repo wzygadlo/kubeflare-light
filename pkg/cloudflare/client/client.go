@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/cloudflare/cloudflare-go/v4"
 	"github.com/cloudflare/cloudflare-go/v4/option"
@@ -475,7 +476,7 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 			}
 
 			// Extract rate limit parameters from the ratelimit configuration
-			// NOTE: All actions (block, challenge, js_challenge, managed_challenge) can have rate limiting
+			// NOTE: All actions (block, challenge, js_challenge, managed_challenge, log) can have rate limiting
 			if rule.Ratelimit != nil {
 				// Try to cast to different ratelimit struct types
 				extracted := false
@@ -485,28 +486,99 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 					rateLimit.Threshold = int(blockRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(blockRateLimit.Period)
 					extracted = true
-				} else if challengeRateLimit, ok := rule.Ratelimit.(rulesets.PhaseGetResponseRulesRulesetsChallengeRuleRatelimit); ok {
+				} else if logRateLimit, ok := rule.Ratelimit.(rulesets.LogRuleRatelimit); ok {
+					// Handle log action ratelimit type
+					rateLimit.Threshold = int(logRateLimit.RequestsPerPeriod)
+					rateLimit.Period = int(logRateLimit.Period)
+					extracted = true
+				} else if managedChallengeRateLimit, ok := rule.Ratelimit.(rulesets.ManagedChallengeRuleRatelimit); ok {
+					// Handle managed_challenge action ratelimit type
+					rateLimit.Threshold = int(managedChallengeRateLimit.RequestsPerPeriod)
+					rateLimit.Period = int(managedChallengeRateLimit.Period)
+					extracted = true
+				} else if challengeRateLimit, ok := rule.Ratelimit.(rulesets.ChallengeRuleRatelimit); ok {
 					// Handle challenge action ratelimit type
 					rateLimit.Threshold = int(challengeRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(challengeRateLimit.Period)
 					extracted = true
+				} else if jsRateLimit, ok := rule.Ratelimit.(rulesets.JSChallengeRuleRatelimit); ok {
+					// Handle js_challenge action ratelimit type
+					rateLimit.Threshold = int(jsRateLimit.RequestsPerPeriod)
+					rateLimit.Period = int(jsRateLimit.Period)
+					extracted = true
+				} else if phaseGetRespRateLimit, ok := rule.Ratelimit.(rulesets.PhaseGetResponseRulesRulesetsLogRuleRatelimit); ok {
+					// Handle PhaseGetResponse log ratelimit type (from API response)
+					rateLimit.Threshold = int(phaseGetRespRateLimit.RequestsPerPeriod)
+					rateLimit.Period = int(phaseGetRespRateLimit.Period)
+					extracted = true
+				} else if phaseGetRespChallengeRateLimit, ok := rule.Ratelimit.(rulesets.PhaseGetResponseRulesRulesetsChallengeRuleRatelimit); ok {
+					// Handle PhaseGetResponse challenge ratelimit type
+					rateLimit.Threshold = int(phaseGetRespChallengeRateLimit.RequestsPerPeriod)
+					rateLimit.Period = int(phaseGetRespChallengeRateLimit.Period)
+					extracted = true
 				} else {
-					// Try alternative: access via reflection or type assertion
-					fmt.Printf("DEBUG: rule.Ratelimit type: %T, trying reflection extraction\n", rule.Ratelimit)
-
-					// Fallback: try to extract via interface{} reflection
-					if rateLimitInterface, ok := rule.Ratelimit.(interface {
-						GetRequestsPerPeriod() *int64
-						GetPeriod() *int64
-					}); ok {
-						if reqsPerPeriod := rateLimitInterface.GetRequestsPerPeriod(); reqsPerPeriod != nil {
-							rateLimit.Threshold = int(*reqsPerPeriod)
-							extracted = true
+					// Advanced extraction using reflection for any unhandled types
+					// This is a more robust approach that works with any struct that has the required fields
+					v := reflect.ValueOf(rule.Ratelimit)
+					// Handle pointer types
+					if v.Kind() == reflect.Ptr {
+						v = v.Elem()
+					}
+					
+					// Try to get fields by name using reflection
+					if v.Kind() == reflect.Struct {
+						// Try RequestsPerPeriod field
+						if reqField := v.FieldByName("RequestsPerPeriod"); reqField.IsValid() {
+							if reqField.CanInterface() {
+								switch val := reqField.Interface().(type) {
+								case int64:
+									rateLimit.Threshold = int(val)
+									extracted = true
+								case int:
+									rateLimit.Threshold = val
+									extracted = true
+								case float64:
+									rateLimit.Threshold = int(val)
+									extracted = true
+								}
+							}
 						}
-						if period := rateLimitInterface.GetPeriod(); period != nil {
-							rateLimit.Period = int(*period)
-							extracted = true
+						
+						// Try Period field
+						if periodField := v.FieldByName("Period"); periodField.IsValid() {
+							if periodField.CanInterface() {
+								switch val := periodField.Interface().(type) {
+								case int64:
+									rateLimit.Period = int(val)
+									extracted = true
+								case int:
+									rateLimit.Period = val
+									extracted = true
+								case float64:
+									rateLimit.Period = int(val)
+									extracted = true
+								}
+							}
 						}
+					}
+					
+					// Fallback: Try to extract via map interface
+					if !extracted {
+						if rateLimitMap, ok := rule.Ratelimit.(map[string]interface{}); ok {
+							if reqPerPeriod, ok := rateLimitMap["requests_per_period"].(float64); ok {
+								rateLimit.Threshold = int(reqPerPeriod)
+								extracted = true
+							}
+							if period, ok := rateLimitMap["period"].(float64); ok {
+								rateLimit.Period = int(period)
+								extracted = true
+							}
+						}
+					}
+					
+					if !extracted {
+						// Log unknown type for debugging only if extraction completely failed
+						fmt.Printf("WARNING: Could not extract ratelimit from type %T for rule %s (action: %s), using defaults\n", rule.Ratelimit, rule.ID, rule.Action)
 					}
 				}
 

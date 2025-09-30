@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -27,7 +28,7 @@ type WAFRuleReconciler struct {
 	client.Client
 	Log               logr.Logger
 	Scheme            *runtime.Scheme
-	CF                *cfclient.CloudflareClient
+	CF                cfclient.CloudflareClientInterface
 	ZoneResolver      *utils.ZoneResolver
 	ReconcileInterval time.Duration
 	ErrorInterval     time.Duration
@@ -145,22 +146,87 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 
 		log.Info("Created WAF rule in Cloudflare", "cloudflareId", createdRule.ID)
 	} else {
-		// Update existing WAF rule in Cloudflare
-		_, err := r.CF.UpdateFirewallRule(ctx, zoneID, wafRule.Status.CloudflareID, cfWAFRule)
+		// Always check current state from Cloudflare to detect external changes (drift detection)
+		currentCFWAFRule, err := r.CF.GetFirewallRule(ctx, zoneID, wafRule.Status.CloudflareID)
 		if err != nil {
-			log.Error(err, "Failed to update WAF rule in Cloudflare")
-			r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, "UpdateFailed", err.Error())
+			log.Error(err, "Failed to get current WAF rule from Cloudflare")
+			// If rule was deleted in Cloudflare, recreate it
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+				log.Info("WAF rule not found in Cloudflare, recreating", "cloudflareId", wafRule.Status.CloudflareID)
+				wafRule.Status.CloudflareID = "" // Reset ID to trigger recreation
+				wafRule.Status.ObservedGeneration = 0
+				return r.reconcileWAFRule(ctx, wafRule) // Retry reconciliation
+			}
+			r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, "GetFailed", err.Error())
 			r.Status().Update(ctx, wafRule)
 			return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
 		}
 
-		wafRule.Status.ObservedGeneration = wafRule.Generation
-		r.updateWAFCondition(wafRule, "Ready", metav1.ConditionTrue, "Updated", "WAF rule updated successfully in Cloudflare")
+		// Check if update is needed by comparing desired vs current state
+		needsUpdate := r.wafRuleNeedsUpdate(&cfWAFRule, currentCFWAFRule)
+		specChanged := wafRule.Status.ObservedGeneration != wafRule.Generation
 
-		log.Info("Updated WAF rule in Cloudflare", "cloudflareId", wafRule.Status.CloudflareID)
+		if needsUpdate || specChanged {
+			// Update existing WAF rule in Cloudflare
+			_, err := r.CF.UpdateFirewallRule(ctx, zoneID, wafRule.Status.CloudflareID, cfWAFRule)
+			if err != nil {
+				log.Error(err, "Failed to update WAF rule in Cloudflare")
+				r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, "UpdateFailed", err.Error())
+				r.Status().Update(ctx, wafRule)
+				return ctrl.Result{RequeueAfter: r.ErrorInterval}, err
+			}
+
+			wafRule.Status.ObservedGeneration = wafRule.Generation
+			r.updateWAFCondition(wafRule, "Ready", metav1.ConditionTrue, "Updated", "WAF rule updated successfully in Cloudflare")
+
+			if specChanged {
+				log.Info("Updated WAF rule in Cloudflare due to spec change", "cloudflareId", wafRule.Status.CloudflareID)
+			} else {
+				log.Info("Updated WAF rule in Cloudflare due to drift", "cloudflareId", wafRule.Status.CloudflareID)
+			}
+
+			// Update status after changes
+			err = r.Status().Update(ctx, wafRule)
+			if err != nil {
+				log.Error(err, "Failed to update WAFRule status")
+				return ctrl.Result{}, err
+			}
+
+			// Requeue with longer delay to account for Cloudflare API consistency
+			log.Info("Requeuing in 2m to verify update", "wafrule", wafRule.Name)
+			return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+		} else {
+			// No update needed, mark as observed if spec changed
+			statusNeedsUpdate := false
+			if specChanged {
+				wafRule.Status.ObservedGeneration = wafRule.Generation
+				statusNeedsUpdate = true
+			}
+
+			// Only update condition if it's not already "Synced"
+			if len(wafRule.Status.Conditions) == 0 ||
+				wafRule.Status.Conditions[len(wafRule.Status.Conditions)-1].Reason != "Synced" {
+				r.updateWAFCondition(wafRule, "Ready", metav1.ConditionTrue, "Synced", "WAF rule is in sync with Cloudflare")
+				statusNeedsUpdate = true
+			}
+
+			// Only update status if there are actual changes
+			if statusNeedsUpdate {
+				err = r.Status().Update(ctx, wafRule)
+				if err != nil {
+					log.Error(err, "Failed to update WAFRule status")
+					return ctrl.Result{}, err
+				}
+			}
+
+			log.V(1).Info("WAF rule is in sync with Cloudflare", "cloudflareId", wafRule.Status.CloudflareID)
+			// No changes needed - return empty result for natural reconcile cycle every 15m
+			log.V(1).Info("WAF rule in sync, using natural reconcile cycle", "wafrule", wafRule.Name)
+			return ctrl.Result{}, nil
+		}
 	}
 
-	// Update status
+	// For creation case, always use the normal reconcile interval
 	err = r.Status().Update(ctx, wafRule)
 	if err != nil {
 		log.Error(err, "Failed to update WAFRule status")
@@ -193,16 +259,20 @@ func (r *WAFRuleReconciler) finalizeWAFRule(ctx context.Context, wafRule *cloudf
 }
 
 func (r *WAFRuleReconciler) convertToCloudflareWAFRule(wafRule *cloudflareV1alpha1.WAFRule) cfclient.FirewallRule {
+	description := wafRule.Spec.Description
+	if description == "" {
+		description = wafRule.Name
+	}
+
 	rule := cfclient.FirewallRule{
 		ID:          wafRule.Status.CloudflareID,
 		Name:        wafRule.Name,
-		Description: wafRule.Spec.Description,
+		Description: description,
 		Expression:  wafRule.Spec.Expression,
 		Action:      wafRule.Spec.Action,
 		Paused:      wafRule.Spec.Paused,
 	}
 
-	// Set priority if provided
 	if wafRule.Spec.Priority != 0 {
 		rule.Priority = wafRule.Spec.Priority
 	}
@@ -227,4 +297,40 @@ func (r *WAFRuleReconciler) updateWAFCondition(wafRule *cloudflareV1alpha1.WAFRu
 		}
 	}
 	wafRule.Status.Conditions = append(wafRule.Status.Conditions, condition)
+}
+
+// wafRuleNeedsUpdate compares desired state with current Cloudflare state
+func (r *WAFRuleReconciler) wafRuleNeedsUpdate(desired, current *cfclient.FirewallRule) bool {
+	if current == nil {
+		r.Log.Info("WAF rule update needed: current state is nil")
+		return true // If we can't get current state, assume update is needed
+	}
+
+	// DEBUG: Log all field values for comparison
+	r.Log.V(1).Info("Comparing WAF rule states",
+		"desired.Description", desired.Description, "current.Description", current.Description,
+		"desired.Expression", desired.Expression, "current.Expression", current.Expression,
+		"desired.Action", desired.Action, "current.Action", current.Action,
+		"desired.Paused", desired.Paused, "current.Paused", current.Paused)
+
+	// Compare key fields that would indicate a change is needed
+	if desired.Description != current.Description {
+		r.Log.Info("WAF rule update needed: description mismatch", "desired", desired.Description, "current", current.Description)
+		return true
+	}
+	if desired.Expression != current.Expression {
+		r.Log.Info("WAF rule update needed: expression mismatch", "desired", desired.Expression, "current", current.Expression)
+		return true
+	}
+	if desired.Action != current.Action {
+		r.Log.Info("WAF rule update needed: action mismatch", "desired", desired.Action, "current", current.Action)
+		return true
+	}
+	if desired.Paused != current.Paused {
+		r.Log.Info("WAF rule update needed: paused mismatch", "desired", desired.Paused, "current", current.Paused)
+		return true
+	}
+
+	r.Log.V(1).Info("WAF rule no update needed: all fields match")
+	return false // No differences found
 }

@@ -23,6 +23,9 @@ type WAFRuleSpec struct {
 	Paused bool `json:"paused,omitempty"`
 
 	// Priority defines the priority of the rule
+	// DEPRECATED: Cloudflare Rulesets API does not support numeric priority.
+	// Rule priority is determined by the order of rules in the ruleset.
+	// This field is kept for backward compatibility but is not used.
 	Priority int `json:"priority,omitempty"`
 
 	// ActionParameters defines additional parameters for the action

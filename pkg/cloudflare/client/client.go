@@ -4,29 +4,33 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/cloudflare/cloudflare-go/v4"
 	"github.com/cloudflare/cloudflare-go/v4/option"
 	"github.com/cloudflare/cloudflare-go/v4/rulesets"
 	"github.com/cloudflare/cloudflare-go/v4/zones"
+	"golang.org/x/time/rate"
 )
 
 // CloudflareClient wraps the official Cloudflare Go v4 client
 type CloudflareClient struct {
-	client *cloudflare.Client
+	client      *cloudflare.Client
+	rateLimiter *rate.Limiter
 }
 
 // RateLimit represents a rate limiting rule structure compatible with v4 API
 type RateLimit struct {
-	ID          string                 `json:"id,omitempty"`
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	Expression  string                 `json:"expression"`
-	Action      string                 `json:"action"`
-	Threshold   int                    `json:"threshold"`
-	Period      int                    `json:"period"`
-	Disabled    bool                   `json:"disabled,omitempty"`
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	ID              string                 `json:"id,omitempty"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description,omitempty"`
+	Expression      string                 `json:"expression"`
+	Action          string                 `json:"action"`
+	Threshold       int                    `json:"threshold"`
+	Period          int                    `json:"period"`
+	Characteristics []string               `json:"characteristics,omitempty"`
+	Disabled        bool                   `json:"disabled,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // FirewallRule represents a firewall rule structure compatible with v4 API
@@ -36,7 +40,7 @@ type FirewallRule struct {
 	Description string                 `json:"description,omitempty"`
 	Expression  string                 `json:"expression"`
 	Action      string                 `json:"action"`
-	Priority    int                    `json:"priority,omitempty"`
+	Priority    int                    `json:"priority,omitempty"` // DEPRECATED: Not used by Cloudflare Rulesets API - priority is determined by rule order in ruleset
 	Paused      bool                   `json:"paused,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }
@@ -58,11 +62,11 @@ type CloudflareClientInterface interface {
 	ListRateLimits(ctx context.Context, zoneID string) ([]RateLimit, error)
 
 	// WAF Rule operations
-	CreateWAFRule(ctx context.Context, zoneID string, rule *FirewallRule) (*FirewallRule, error)
-	GetWAFRule(ctx context.Context, zoneID, ruleID string) (*FirewallRule, error)
-	UpdateWAFRule(ctx context.Context, zoneID, ruleID string, rule *FirewallRule) (*FirewallRule, error)
-	DeleteWAFRule(ctx context.Context, zoneID, ruleID string) error
-	ListWAFRules(ctx context.Context, zoneID string) ([]FirewallRule, error)
+	CreateFirewallRule(ctx context.Context, zoneID string, rule FirewallRule) (*FirewallRule, error)
+	GetFirewallRule(ctx context.Context, zoneID, ruleID string) (*FirewallRule, error)
+	UpdateFirewallRule(ctx context.Context, zoneID, ruleID string, rule FirewallRule) (*FirewallRule, error)
+	DeleteFirewallRule(ctx context.Context, zoneID, ruleID string) error
+	ListFirewallRules(ctx context.Context, zoneID string) ([]FirewallRule, error)
 }
 
 // NewClient creates a new Cloudflare v4 client with API token
@@ -75,14 +79,32 @@ func NewClient(apiToken string) (*CloudflareClient, error) {
 		option.WithAPIToken(apiToken),
 	)
 
+	// Create rate limiter to prevent API rate limit errors
+	// Cloudflare enterprise typically allows 1200 req/5min
+	// Using 5 req/sec = 300 req/min as safe limit with burst capacity
+	rateLimiter := rate.NewLimiter(rate.Every(200*time.Millisecond), 5)
+
 	return &CloudflareClient{
-		client: client,
+		client:      client,
+		rateLimiter: rateLimiter,
 	}, nil
 }
 
 // GetClient returns the underlying Cloudflare v4 client
 func (c *CloudflareClient) GetClient() *cloudflare.Client {
 	return c.client
+}
+
+// waitForRateLimit waits if necessary to respect rate limits
+func (c *CloudflareClient) waitForRateLimit(ctx context.Context) error {
+	fmt.Printf("Rate limiter: waiting for permission to make API call...\n")
+	err := c.rateLimiter.Wait(ctx)
+	if err != nil {
+		fmt.Printf("Rate limiter: context cancelled or error: %v\n", err)
+		return err
+	}
+	fmt.Printf("Rate limiter: permission granted, making API call\n")
+	return nil
 }
 
 // VerifyToken verifies the API token is valid by making a test API call
@@ -106,9 +128,31 @@ func (c *CloudflareClient) GetZone(ctx context.Context, zoneID string) (Zone, er
 	return *zone, nil
 }
 
+// GetZoneByName retrieves zone information by zone name
+func (c *CloudflareClient) GetZoneByName(ctx context.Context, zoneName string) (*Zone, error) {
+	// List zones and find the one with matching name
+	zonesList, err := c.client.Zones.List(ctx, zones.ZoneListParams{
+		Name: cloudflare.F(zoneName),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list zones: %w", err)
+	}
+
+	if len(zonesList.Result) == 0 {
+		return nil, fmt.Errorf("zone %s not found", zoneName)
+	}
+
+	// Return the first matching zone
+	return &zonesList.Result[0], nil
+}
+
 // CreateRateLimit creates a new rate limit rule using rulesets API
 // CRITICAL: This now uses the modern rulesets API to replace the deprecated Rate Limiting API (sunset June 15, 2025)
 func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, rateLimit RateLimit) (*RateLimit, error) {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
@@ -137,22 +181,28 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 		return nil, fmt.Errorf("failed to get rate limit ruleset: %w", err)
 	}
 
-	// Create a new rate limiting rule using BlockRuleParam but with dynamic action
-	// Note: Using BlockRuleParam as the base type but changing the action field dynamically
-	newRuleParams := []rulesets.PhaseUpdateParamsRuleUnion{
-		rulesets.BlockRuleParam{
-			Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
-			Description: cloudflare.F(rateLimit.Description),
-			Expression:  cloudflare.F(rateLimit.Expression),
-			Enabled:     cloudflare.F(!rateLimit.Disabled), // CRITICAL: Enabled field is required
-			Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
-				Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}), // Required by Cloudflare API
-				Period:            cloudflare.F(int64(rateLimit.Period)),
-				RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
-				MitigationTimeout: cloudflare.F(int64(rateLimit.Period)),
-			}),
-		},
+	// Create a new rate limiting rule using the correct parameter type for the action
+	newRule, err := c.createRuleParamForAction(rateLimit.Action, "", rateLimit.Description, rateLimit.Expression, !rateLimit.Disabled)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rule param for action %s: %w", rateLimit.Action, err)
 	}
+
+	// Set the rate limiting configuration based on the rule type
+	characteristics := rateLimit.Characteristics
+	if len(characteristics) == 0 {
+		characteristics = []string{"ip.src", "cf.colo.id"}
+	}
+	newRule, err = c.setRateLimitConfig(newRule, rulesets.BlockRuleRatelimitParam{
+		Characteristics:   cloudflare.F(characteristics),
+		Period:            cloudflare.F(int64(rateLimit.Period)),
+		RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
+		MitigationTimeout: cloudflare.F(int64(rateLimit.Period)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to set rate limit config: %w", err)
+	}
+
+	newRuleParams := []rulesets.PhaseUpdateParamsRuleUnion{newRule}
 
 	// Add existing rules to preserve them (with their rate limiting configuration)
 	for _, rule := range currentRuleset.Rules {
@@ -162,42 +212,43 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 			continue // Skip rules without ratelimit configuration
 		}
 
-		// All rate limiting rules use the same consistent structure regardless of action type
-		// Based on official Cloudflare documentation: https://developers.cloudflare.com/waf/rate-limiting-rules/create-api/
-		ruleParam := rulesets.BlockRuleParam{
-			ID:          cloudflare.F(rule.ID),
-			Action:      cloudflare.F(rulesets.BlockRuleAction(rule.Action)),
-			Description: cloudflare.F(rule.Description),
-			Expression:  cloudflare.F(rule.Expression),
-			Enabled:     cloudflare.F(rule.Enabled), // CRITICAL: Preserve the enabled state
+		// Use the correct parameter type for the action to preserve existing rules
+		ruleParam, err := c.createRuleParamForAction(string(rule.Action), rule.ID, rule.Description, rule.Expression, rule.Enabled)
+		if err != nil {
+			// Fallback to BlockRuleParam if we can't determine the correct type
+			ruleParam = rulesets.BlockRuleParam{
+				ID:          cloudflare.F(rule.ID),
+				Action:      cloudflare.F(rulesets.BlockRuleActionBlock), // Use "block" as safe fallback
+				Description: cloudflare.F(rule.Description),
+				Expression:  cloudflare.F(rule.Expression),
+				Enabled:     cloudflare.F(rule.Enabled),
+			}
 		}
 
 		// CRITICAL: ALL rules in http_ratelimit phase MUST have ratelimit configuration
-		// Try multiple type assertions to handle different action types
-		rateLimitExtracted := false
-		
-		// Try BlockRuleRatelimit (for block actions)
+		// Extract existing rate limit configuration and preserve it
+		rateLimitConfig := rulesets.BlockRuleRatelimitParam{
+			Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}),
+			Period:            cloudflare.F(int64(60)),
+			RequestsPerPeriod: cloudflare.F(int64(100)),
+			MitigationTimeout: cloudflare.F(int64(60)),
+		}
+
+		// Try to extract the existing rate limit configuration
 		if blockRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-			ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
+			rateLimitConfig = rulesets.BlockRuleRatelimitParam{
 				Characteristics:   cloudflare.F(blockRateLimit.Characteristics),
 				Period:            cloudflare.F(blockRateLimit.Period),
 				RequestsPerPeriod: cloudflare.F(blockRateLimit.RequestsPerPeriod),
 				MitigationTimeout: cloudflare.F(blockRateLimit.MitigationTimeout),
-			})
-			rateLimitExtracted = true
+			}
 		}
-		
-		// If we couldn't extract the ratelimit config, use safe defaults
-		// This ensures ALL rules have ratelimit configuration
-		if !rateLimitExtracted {
-			// Use default ratelimit configuration to ensure the rule is valid
-			// These defaults match common rate limit settings
-			ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-				Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}),
-				Period:            cloudflare.F(int64(60)),
-				RequestsPerPeriod: cloudflare.F(int64(100)),
-				MitigationTimeout: cloudflare.F(int64(60)),
-			})
+
+		// Set the rate limit configuration using the helper function
+		ruleParam, err = c.setRateLimitConfig(ruleParam, rateLimitConfig)
+		if err != nil {
+			// If we can't set the rate limit config, skip this rule to avoid API errors
+			continue
 		}
 
 		newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{ruleParam}, newRuleParams...)
@@ -234,6 +285,10 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 
 // UpdateRateLimit updates an existing rate limit rule using rulesets API
 func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimitID string, rateLimit RateLimit) (*RateLimit, error) {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
@@ -273,6 +328,10 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 		if rule.ID == rateLimitID {
 			// Replace the rule with updated version using the provided action
 			// Use BlockRuleParam as the base type but change the action dynamically
+			characteristics := rateLimit.Characteristics
+			if len(characteristics) == 0 {
+				characteristics = []string{"ip.src", "cf.colo.id"}
+			}
 			newRuleParams = append(newRuleParams, rulesets.BlockRuleParam{
 				ID:          cloudflare.F(rateLimitID),
 				Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
@@ -280,7 +339,7 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 				Expression:  cloudflare.F(rateLimit.Expression),
 				Enabled:     cloudflare.F(!rateLimit.Disabled), // CRITICAL: Enabled field is required
 				Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
-					Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}), // Required by Cloudflare API
+					Characteristics:   cloudflare.F(characteristics),
 					Period:            cloudflare.F(int64(rateLimit.Period)),
 					RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
 					MitigationTimeout: cloudflare.F(int64(rateLimit.Period)),
@@ -359,6 +418,10 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 
 // DeleteRateLimit deletes a rate limit rule using rulesets API
 func (c *CloudflareClient) DeleteRateLimit(ctx context.Context, zoneID, rateLimitID string) error {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return fmt.Errorf("zone ID cannot be empty")
 	}
@@ -447,6 +510,10 @@ func (c *CloudflareClient) DeleteRateLimit(ctx context.Context, zoneID, rateLimi
 
 // GetRateLimit retrieves a specific rate limit rule using rulesets API
 func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID string) (*RateLimit, error) {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
@@ -469,7 +536,7 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 			rateLimit := RateLimit{
 				ID:          rule.ID,
 				Name:        rule.Description, // Cloudflare stores name in description field
-				Description: rule.Description, // Keep description same as name for consistency
+				Description: rule.Description, // Use Cloudflare description as-is for proper comparison
 				Expression:  rule.Expression,
 				Action:      string(rule.Action),
 				Disabled:    !rule.Enabled, // Convert enabled to disabled
@@ -478,45 +545,33 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 			// Extract rate limit parameters from the ratelimit configuration
 			// NOTE: All actions (block, challenge, js_challenge, managed_challenge, log) can have rate limiting
 			if rule.Ratelimit != nil {
-				// Try to cast to different ratelimit struct types
 				extracted := false
 
-				// Try BlockRuleRatelimit (for block actions)
+				// First try the types we KNOW exist in v4.5.1 (based on successful compilation)
 				if blockRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
 					rateLimit.Threshold = int(blockRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(blockRateLimit.Period)
+					rateLimit.Characteristics = blockRateLimit.Characteristics
 					extracted = true
 				} else if logRateLimit, ok := rule.Ratelimit.(rulesets.LogRuleRatelimit); ok {
-					// Handle log action ratelimit type
 					rateLimit.Threshold = int(logRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(logRateLimit.Period)
+					rateLimit.Characteristics = logRateLimit.Characteristics
 					extracted = true
 				} else if managedChallengeRateLimit, ok := rule.Ratelimit.(rulesets.ManagedChallengeRuleRatelimit); ok {
-					// Handle managed_challenge action ratelimit type
 					rateLimit.Threshold = int(managedChallengeRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(managedChallengeRateLimit.Period)
-					extracted = true
-				} else if challengeRateLimit, ok := rule.Ratelimit.(rulesets.ChallengeRuleRatelimit); ok {
-					// Handle challenge action ratelimit type
-					rateLimit.Threshold = int(challengeRateLimit.RequestsPerPeriod)
-					rateLimit.Period = int(challengeRateLimit.Period)
-					extracted = true
-				} else if jsRateLimit, ok := rule.Ratelimit.(rulesets.JSChallengeRuleRatelimit); ok {
-					// Handle js_challenge action ratelimit type
-					rateLimit.Threshold = int(jsRateLimit.RequestsPerPeriod)
-					rateLimit.Period = int(jsRateLimit.Period)
-					extracted = true
-				} else if phaseGetRespRateLimit, ok := rule.Ratelimit.(rulesets.PhaseGetResponseRulesRulesetsLogRuleRatelimit); ok {
-					// Handle PhaseGetResponse log ratelimit type (from API response)
-					rateLimit.Threshold = int(phaseGetRespRateLimit.RequestsPerPeriod)
-					rateLimit.Period = int(phaseGetRespRateLimit.Period)
+					rateLimit.Characteristics = managedChallengeRateLimit.Characteristics
 					extracted = true
 				} else if phaseGetRespChallengeRateLimit, ok := rule.Ratelimit.(rulesets.PhaseGetResponseRulesRulesetsChallengeRuleRatelimit); ok {
-					// Handle PhaseGetResponse challenge ratelimit type
 					rateLimit.Threshold = int(phaseGetRespChallengeRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(phaseGetRespChallengeRateLimit.Period)
+					rateLimit.Characteristics = phaseGetRespChallengeRateLimit.Characteristics
 					extracted = true
-				} else {
+				}
+
+				// If none of the known types matched, use reflection
+				if !extracted {
 					// Advanced extraction using reflection for any unhandled types
 					// This is a more robust approach that works with any struct that has the required fields
 					v := reflect.ValueOf(rule.Ratelimit)
@@ -524,7 +579,7 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 					if v.Kind() == reflect.Ptr {
 						v = v.Elem()
 					}
-					
+
 					// Try to get fields by name using reflection
 					if v.Kind() == reflect.Struct {
 						// Try RequestsPerPeriod field
@@ -543,7 +598,7 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 								}
 							}
 						}
-						
+
 						// Try Period field
 						if periodField := v.FieldByName("Period"); periodField.IsValid() {
 							if periodField.CanInterface() {
@@ -561,7 +616,7 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 							}
 						}
 					}
-					
+
 					// Fallback: Try to extract via map interface
 					if !extracted {
 						if rateLimitMap, ok := rule.Ratelimit.(map[string]interface{}); ok {
@@ -575,7 +630,7 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 							}
 						}
 					}
-					
+
 					if !extracted {
 						// Log unknown type for debugging only if extraction completely failed
 						fmt.Printf("WARNING: Could not extract ratelimit from type %T for rule %s (action: %s), using defaults\n", rule.Ratelimit, rule.ID, rule.Action)
@@ -604,6 +659,10 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 
 // ListRateLimits lists all rate limit rules for a zone
 func (c *CloudflareClient) ListRateLimits(ctx context.Context, zoneID string) ([]RateLimit, error) {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
@@ -638,6 +697,10 @@ func (c *CloudflareClient) ListRateLimits(ctx context.Context, zoneID string) ([
 
 // CreateFirewallRule creates a new firewall rule (for WAF) using rulesets API
 func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string, rule FirewallRule) (*FirewallRule, error) {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
@@ -659,7 +722,7 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 
 	// Create new WAF rule based on action type
 	var newRuleParam rulesets.PhaseUpdateParamsRuleUnion
-	
+
 	switch rule.Action {
 	case "block":
 		newRuleParam = rulesets.BlockRuleParam{
@@ -718,7 +781,7 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 	for _, existingRule := range currentRuleset.Rules {
 		// Re-create the rule parameter based on its action type to preserve it
 		var ruleParam rulesets.PhaseUpdateParamsRuleUnion
-		
+
 		switch existingRule.Action {
 		case "block":
 			ruleParam = rulesets.BlockRuleParam{
@@ -764,7 +827,7 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 			// Skip unsupported rule types
 			continue
 		}
-		
+
 		existingRules = append(existingRules, ruleParam)
 	}
 
@@ -799,6 +862,10 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 
 // UpdateFirewallRule updates an existing firewall rule
 func (c *CloudflareClient) UpdateFirewallRule(ctx context.Context, zoneID, ruleID string, rule FirewallRule) (*FirewallRule, error) {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
@@ -818,14 +885,14 @@ func (c *CloudflareClient) UpdateFirewallRule(ctx context.Context, zoneID, ruleI
 	// Find the rule to update and preserve other rules
 	var allRules []rulesets.PhaseUpdateParamsRuleUnion
 	var targetRuleFound bool
-	
+
 	for _, existingRule := range currentRuleset.Rules {
 		var ruleParam rulesets.PhaseUpdateParamsRuleUnion
-		
+
 		if existingRule.ID == ruleID {
 			// This is the rule we want to update
 			targetRuleFound = true
-			
+
 			switch rule.Action {
 			case "block":
 				ruleParam = rulesets.BlockRuleParam{
@@ -918,7 +985,7 @@ func (c *CloudflareClient) UpdateFirewallRule(ctx context.Context, zoneID, ruleI
 				continue
 			}
 		}
-		
+
 		allRules = append(allRules, ruleParam)
 	}
 
@@ -955,6 +1022,10 @@ func (c *CloudflareClient) UpdateFirewallRule(ctx context.Context, zoneID, ruleI
 
 // DeleteFirewallRule deletes a firewall rule
 func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleID string) error {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return fmt.Errorf("zone ID cannot be empty")
 	}
@@ -974,7 +1045,7 @@ func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleI
 	// Build new rules list without the rule to delete
 	var remainingRules []rulesets.PhaseUpdateParamsRuleUnion
 	var targetRuleFound bool
-	
+
 	for _, existingRule := range currentRuleset.Rules {
 		if existingRule.ID == ruleID {
 			// Skip this rule (delete it)
@@ -984,7 +1055,7 @@ func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleI
 
 		// Preserve all other existing rules
 		var ruleParam rulesets.PhaseUpdateParamsRuleUnion
-		
+
 		switch existingRule.Action {
 		case "block":
 			ruleParam = rulesets.BlockRuleParam{
@@ -1030,7 +1101,7 @@ func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleI
 			// Skip unsupported rule types
 			continue
 		}
-		
+
 		remainingRules = append(remainingRules, ruleParam)
 	}
 
@@ -1051,32 +1122,148 @@ func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleI
 }
 
 // GetFirewallRule retrieves a specific firewall rule
-func (c *CloudflareClient) GetFirewallRule(ctx context.Context, zoneID, rulesetID string) (*FirewallRule, error) {
+func (c *CloudflareClient) GetFirewallRule(ctx context.Context, zoneID, ruleID string) (*FirewallRule, error) {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
-	if rulesetID == "" {
-		return nil, fmt.Errorf("ruleset ID cannot be empty")
+	if ruleID == "" {
+		return nil, fmt.Errorf("rule ID cannot be empty")
 	}
 
-	// TODO: Implement with correct v4.5.1 rulesets API for custom firewall rules
-	return &FirewallRule{
-		ID:          rulesetID,
-		Name:        "Example WAF Rule",
-		Description: "Example WAF rule",
-		Expression:  "true",
-		Action:      "block",
-		Priority:    1,
-		Paused:      false,
-	}, nil
+	// Get the http_request_firewall_custom phase ruleset for the zone
+	phase := rulesets.PhaseHTTPRequestFirewallCustom
+	currentRuleset, err := c.client.Rulesets.Phases.Get(ctx, phase, rulesets.PhaseGetParams{
+		ZoneID: cloudflare.F(zoneID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get firewall custom ruleset: %w", err)
+	}
+
+	// Find the specific rule by ID
+	for _, rule := range currentRuleset.Rules {
+		if rule.ID == ruleID {
+			return &FirewallRule{
+				ID:          rule.ID,
+				Name:        rule.Description,
+				Description: rule.Description,
+				Expression:  rule.Expression,
+				Action:      string(rule.Action),
+				Priority:    0,
+				Paused:      !rule.Enabled,
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("firewall rule with ID %s not found", ruleID)
 }
 
 // ListFirewallRules lists all firewall rules for a zone
 func (c *CloudflareClient) ListFirewallRules(ctx context.Context, zoneID string) ([]FirewallRule, error) {
+	// Wait for rate limiter before making API call
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
 	if zoneID == "" {
 		return nil, fmt.Errorf("zone ID cannot be empty")
 	}
 
-	// TODO: Implement with correct v4.5.1 rulesets API for custom firewall rules
-	return []FirewallRule{}, nil
+	// Get the http_request_firewall_custom phase ruleset for the zone
+	phase := rulesets.PhaseHTTPRequestFirewallCustom
+	currentRuleset, err := c.client.Rulesets.Phases.Get(ctx, phase, rulesets.PhaseGetParams{
+		ZoneID: cloudflare.F(zoneID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get firewall custom ruleset: %w", err)
+	}
+
+	var rules []FirewallRule
+	for _, rule := range currentRuleset.Rules {
+		rules = append(rules, FirewallRule{
+			ID:          rule.ID,
+			Name:        rule.Description,
+			Description: rule.Description,
+			Expression:  rule.Expression,
+			Action:      string(rule.Action),
+			Priority:    0,
+			Paused:      !rule.Enabled,
+		})
+	}
+
+	return rules, nil
+}
+
+// createRuleParamForAction creates the appropriate rule parameter type based on the action
+func (c *CloudflareClient) createRuleParamForAction(action, id, description, expression string, enabled bool) (rulesets.PhaseUpdateParamsRuleUnion, error) {
+	// Validate action type before processing
+	validActions := map[string]bool{
+		"log":               true,
+		"block":             true,
+		"challenge":         true,
+		"js_challenge":      true,
+		"managed_challenge": true,
+	}
+	if !validActions[action] {
+		return nil, fmt.Errorf("unsupported action type: %s (valid: log, block, challenge, js_challenge, managed_challenge)", action)
+	}
+
+	switch action {
+	case "log":
+		param := rulesets.LogRuleParam{
+			Action:      cloudflare.F(rulesets.LogRuleActionLog),
+			Description: cloudflare.F(description),
+			Expression:  cloudflare.F(expression),
+			Enabled:     cloudflare.F(enabled),
+		}
+		if id != "" {
+			param.ID = cloudflare.F(id)
+		}
+		return param, nil
+	case "block":
+		param := rulesets.BlockRuleParam{
+			Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
+			Description: cloudflare.F(description),
+			Expression:  cloudflare.F(expression),
+			Enabled:     cloudflare.F(enabled),
+		}
+		if id != "" {
+			param.ID = cloudflare.F(id)
+		}
+		return param, nil
+	case "challenge", "js_challenge", "managed_challenge":
+		param := rulesets.BlockRuleParam{
+			Action:      cloudflare.F(rulesets.BlockRuleAction(action)),
+			Description: cloudflare.F(description),
+			Expression:  cloudflare.F(expression),
+			Enabled:     cloudflare.F(enabled),
+		}
+		if id != "" {
+			param.ID = cloudflare.F(id)
+		}
+		return param, nil
+	default:
+		return nil, fmt.Errorf("unsupported action type: %s", action)
+	}
+}
+
+// setRateLimitConfig sets the rate limiting configuration on a rule parameter and returns the updated rule
+func (c *CloudflareClient) setRateLimitConfig(ruleParam rulesets.PhaseUpdateParamsRuleUnion, rateLimitConfig rulesets.BlockRuleRatelimitParam) (rulesets.PhaseUpdateParamsRuleUnion, error) {
+	switch rule := ruleParam.(type) {
+	case rulesets.LogRuleParam:
+		rule.Ratelimit = cloudflare.F(rulesets.LogRuleRatelimitParam{
+			Characteristics:   rateLimitConfig.Characteristics,
+			Period:            rateLimitConfig.Period,
+			RequestsPerPeriod: rateLimitConfig.RequestsPerPeriod,
+			MitigationTimeout: rateLimitConfig.MitigationTimeout,
+		})
+		return rule, nil
+	case rulesets.BlockRuleParam:
+		rule.Ratelimit = cloudflare.F(rateLimitConfig)
+		return rule, nil
+	default:
+		return nil, fmt.Errorf("unsupported rule parameter type: %T", ruleParam)
+	}
 }

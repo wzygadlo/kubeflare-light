@@ -26,6 +26,15 @@ type RateLimitSpec struct {
 	// +optional
 	Match *RateLimitMatch `json:"match,omitempty"`
 
+	// Characteristics defines how Cloudflare tracks the request rate.
+	// Determines how requests are grouped for rate limiting (e.g., per IP, per JA3 fingerprint, etc.)
+	// Available values: "ip.src", "cf.unique_visitor_id", "cf.bot_management.ja3_hash", "cf.bot_management.ja4",
+	// "http.request.headers[\"<name>\"]", "http.request.cookies[\"<name>\"]", "http.host", "ip.src.asnum", etc.
+	// Default: ["ip.src", "cf.colo.id"] if not specified.
+	// Note: "cf.colo.id" is always included automatically by Cloudflare.
+	// +optional
+	Characteristics []string `json:"characteristics,omitempty"`
+
 	// Disabled indicates whether this rate limit is currently disabled
 	// +optional
 	Disabled bool `json:"disabled,omitempty"`

@@ -29,7 +29,7 @@ type RateLimitReconciler struct {
 	client.Client
 	Log               logr.Logger
 	Scheme            *runtime.Scheme
-	CF                *cfclient.CloudflareClient
+	CF                cfclient.CloudflareClientInterface
 	ZoneResolver      *utils.ZoneResolver
 	ReconcileInterval time.Duration
 	ErrorInterval     time.Duration
@@ -141,6 +141,25 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		Action:      "block",                  // Default action
 	}
 
+	// Set characteristics (how requests are grouped for rate limiting)
+	if len(rateLimit.Spec.Characteristics) > 0 {
+		characteristics := make([]string, len(rateLimit.Spec.Characteristics))
+		copy(characteristics, rateLimit.Spec.Characteristics)
+		hasColo := false
+		for _, char := range characteristics {
+			if char == "cf.colo.id" {
+				hasColo = true
+				break
+			}
+		}
+		if !hasColo {
+			characteristics = append(characteristics, "cf.colo.id")
+		}
+		cfRateLimit.Characteristics = characteristics
+	} else {
+		cfRateLimit.Characteristics = []string{"ip.src", "cf.colo.id"}
+	}
+
 	// Set action using official 2025 API actions
 	if rateLimit.Spec.Action != nil {
 		cfRateLimit.Action = rateLimit.Spec.Action.Mode // block, challenge, js_challenge, log
@@ -206,17 +225,49 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 			} else {
 				log.Info("Updated rate limit in Cloudflare due to drift", "cloudflareId", rateLimit.Status.CloudflareID)
 			}
+
+			// Update status after changes
+			err = r.Status().Update(ctx, rateLimit)
+			if err != nil {
+				log.Error(err, "Failed to update RateLimit status")
+				return ctrl.Result{}, err
+			}
+
+			// Requeue with longer delay to account for Cloudflare API consistency
+			log.Info("Requeuing in 2m to verify update", "ratelimit", rateLimit.Name)
+			return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
 		} else {
 			// No update needed, mark as observed if spec changed
+			statusNeedsUpdate := false
 			if specChanged {
 				rateLimit.Status.ObservedGeneration = rateLimit.Generation
+				statusNeedsUpdate = true
 			}
-			r.updateCondition(rateLimit, "Ready", metav1.ConditionTrue, "Synced", "Rate limit is in sync with Cloudflare")
+
+			// Only update condition if it's not already "Synced"
+			if len(rateLimit.Status.Conditions) == 0 ||
+				rateLimit.Status.Conditions[len(rateLimit.Status.Conditions)-1].Reason != "Synced" {
+				r.updateCondition(rateLimit, "Ready", metav1.ConditionTrue, "Synced", "Rate limit is in sync with Cloudflare")
+				statusNeedsUpdate = true
+			}
+
+			// Only update status if there are actual changes
+			if statusNeedsUpdate {
+				err = r.Status().Update(ctx, rateLimit)
+				if err != nil {
+					log.Error(err, "Failed to update RateLimit status")
+					return ctrl.Result{}, err
+				}
+			}
+
 			log.V(1).Info("Rate limit is in sync with Cloudflare", "cloudflareId", rateLimit.Status.CloudflareID)
+			// No changes needed - return empty result for natural reconcile cycle every 15m
+			log.V(1).Info("Rate limit in sync, using natural reconcile cycle", "ratelimit", rateLimit.Name)
+			return ctrl.Result{}, nil
 		}
 	}
 
-	// Update status
+	// For creation case, always use the normal reconcile interval
 	err = r.Status().Update(ctx, rateLimit)
 	if err != nil {
 		log.Error(err, "Failed to update RateLimit status")
@@ -683,6 +734,15 @@ func (r *RateLimitReconciler) rateLimitNeedsUpdate(desired, current *cfclient.Ra
 		return true // If we can't get current state, assume update is needed
 	}
 
+	// DEBUG: Log all field values for comparison
+	r.Log.Info("Comparing rate limit states",
+		"desired.Description", desired.Description, "current.Description", current.Description,
+		"desired.Expression", desired.Expression, "current.Expression", current.Expression,
+		"desired.Action", desired.Action, "current.Action", current.Action,
+		"desired.Threshold", desired.Threshold, "current.Threshold", current.Threshold,
+		"desired.Period", desired.Period, "current.Period", current.Period,
+		"desired.Disabled", desired.Disabled, "current.Disabled", current.Disabled)
+
 	// Compare key fields that would indicate a change is needed
 	if desired.Description != current.Description {
 		r.Log.Info("Rate limit update needed: description mismatch", "desired", desired.Description, "current", current.Description)
@@ -709,7 +769,25 @@ func (r *RateLimitReconciler) rateLimitNeedsUpdate(desired, current *cfclient.Ra
 		return true
 	}
 
-	r.Log.V(1).Info("Rate limit no update needed: all fields match")
+	// Compare characteristics (how requests are grouped for rate limiting)
+	if len(desired.Characteristics) != len(current.Characteristics) {
+		r.Log.Info("Rate limit update needed: characteristics length mismatch",
+			"desired", desired.Characteristics, "current", current.Characteristics)
+		return true
+	}
+	desiredChars := make(map[string]bool)
+	for _, char := range desired.Characteristics {
+		desiredChars[char] = true
+	}
+	for _, char := range current.Characteristics {
+		if !desiredChars[char] {
+			r.Log.Info("Rate limit update needed: characteristics mismatch",
+				"desired", desired.Characteristics, "current", current.Characteristics)
+			return true
+		}
+	}
+
+	r.Log.Info("Rate limit no update needed: all fields match")
 	return false // No differences found
 }
 

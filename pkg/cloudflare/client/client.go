@@ -194,17 +194,15 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 		characteristics = []string{"ip.src", "cf.colo.id"}
 	}
 
-	// Use provided mitigation timeout, otherwise default to period
-	mitigationTimeout := rateLimit.MitigationTimeout
-	if mitigationTimeout <= 0 {
-		mitigationTimeout = rateLimit.Period
-	}
-
+	// Use provided mitigation timeout:
+	// - mitigation_timeout = 0: Throttle mode (block only excess requests)
+	// - mitigation_timeout > 0: Ban mode (block all requests for duration)
+	// Note: Only Enterprise customers can use throttle mode with block action
 	newRule, err = c.setRateLimitConfig(newRule, rulesets.BlockRuleRatelimitParam{
 		Characteristics:   cloudflare.F(characteristics),
 		Period:            cloudflare.F(int64(rateLimit.Period)),
 		RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
-		MitigationTimeout: cloudflare.F(int64(mitigationTimeout)),
+		MitigationTimeout: cloudflare.F(int64(rateLimit.MitigationTimeout)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to set rate limit config: %w", err)
@@ -341,12 +339,9 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 				characteristics = []string{"ip.src", "cf.colo.id"}
 			}
 
-			// Use provided mitigation timeout, otherwise default to period
-			mitigationTimeout := rateLimit.MitigationTimeout
-			if mitigationTimeout <= 0 {
-				mitigationTimeout = rateLimit.Period
-			}
-
+			// Use provided mitigation timeout:
+			// - mitigation_timeout = 0: Throttle mode (block only excess requests)
+			// - mitigation_timeout > 0: Ban mode (block all requests for duration)
 			newRuleParams = append(newRuleParams, rulesets.BlockRuleParam{
 				ID:          cloudflare.F(rateLimitID),
 				Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
@@ -357,7 +352,7 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 					Characteristics:   cloudflare.F(characteristics),
 					Period:            cloudflare.F(int64(rateLimit.Period)),
 					RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
-					MitigationTimeout: cloudflare.F(int64(mitigationTimeout)),
+					MitigationTimeout: cloudflare.F(int64(rateLimit.MitigationTimeout)),
 				}),
 			})
 			ruleFound = true

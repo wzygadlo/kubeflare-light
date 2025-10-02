@@ -141,8 +141,10 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		Action:      "block",                  // Default action
 	}
 
-	// Set mitigation timeout from action spec if provided
-	if rateLimit.Spec.Action != nil && rateLimit.Spec.Action.Timeout > 0 {
+	// Set mitigation timeout from action spec
+	// - timeout = 0: Throttle mode (block only excess requests) - Enterprise only for block action
+	// - timeout > 0: Ban mode (block all requests from client for duration)
+	if rateLimit.Spec.Action != nil {
 		cfRateLimit.MitigationTimeout = rateLimit.Spec.Action.Timeout
 	}
 

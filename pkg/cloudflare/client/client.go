@@ -21,16 +21,17 @@ type CloudflareClient struct {
 
 // RateLimit represents a rate limiting rule structure compatible with v4 API
 type RateLimit struct {
-	ID              string                 `json:"id,omitempty"`
-	Name            string                 `json:"name"`
-	Description     string                 `json:"description,omitempty"`
-	Expression      string                 `json:"expression"`
-	Action          string                 `json:"action"`
-	Threshold       int                    `json:"threshold"`
-	Period          int                    `json:"period"`
-	Characteristics []string               `json:"characteristics,omitempty"`
-	Disabled        bool                   `json:"disabled,omitempty"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	ID                string                 `json:"id,omitempty"`
+	Name              string                 `json:"name"`
+	Description       string                 `json:"description,omitempty"`
+	Expression        string                 `json:"expression"`
+	Action            string                 `json:"action"`
+	Threshold         int                    `json:"threshold"`
+	Period            int                    `json:"period"`
+	MitigationTimeout int                    `json:"mitigation_timeout,omitempty"`
+	Characteristics   []string               `json:"characteristics,omitempty"`
+	Disabled          bool                   `json:"disabled,omitempty"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // FirewallRule represents a firewall rule structure compatible with v4 API
@@ -192,11 +193,18 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 	if len(characteristics) == 0 {
 		characteristics = []string{"ip.src", "cf.colo.id"}
 	}
+
+	// Use provided mitigation timeout, otherwise default to period
+	mitigationTimeout := rateLimit.MitigationTimeout
+	if mitigationTimeout <= 0 {
+		mitigationTimeout = rateLimit.Period
+	}
+
 	newRule, err = c.setRateLimitConfig(newRule, rulesets.BlockRuleRatelimitParam{
 		Characteristics:   cloudflare.F(characteristics),
 		Period:            cloudflare.F(int64(rateLimit.Period)),
 		RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
-		MitigationTimeout: cloudflare.F(int64(rateLimit.Period)),
+		MitigationTimeout: cloudflare.F(int64(mitigationTimeout)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to set rate limit config: %w", err)
@@ -332,6 +340,13 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 			if len(characteristics) == 0 {
 				characteristics = []string{"ip.src", "cf.colo.id"}
 			}
+
+			// Use provided mitigation timeout, otherwise default to period
+			mitigationTimeout := rateLimit.MitigationTimeout
+			if mitigationTimeout <= 0 {
+				mitigationTimeout = rateLimit.Period
+			}
+
 			newRuleParams = append(newRuleParams, rulesets.BlockRuleParam{
 				ID:          cloudflare.F(rateLimitID),
 				Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
@@ -342,7 +357,7 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 					Characteristics:   cloudflare.F(characteristics),
 					Period:            cloudflare.F(int64(rateLimit.Period)),
 					RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
-					MitigationTimeout: cloudflare.F(int64(rateLimit.Period)),
+					MitigationTimeout: cloudflare.F(int64(mitigationTimeout)),
 				}),
 			})
 			ruleFound = true
@@ -551,21 +566,25 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 				if blockRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
 					rateLimit.Threshold = int(blockRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(blockRateLimit.Period)
+					rateLimit.MitigationTimeout = int(blockRateLimit.MitigationTimeout)
 					rateLimit.Characteristics = blockRateLimit.Characteristics
 					extracted = true
 				} else if logRateLimit, ok := rule.Ratelimit.(rulesets.LogRuleRatelimit); ok {
 					rateLimit.Threshold = int(logRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(logRateLimit.Period)
+					rateLimit.MitigationTimeout = int(logRateLimit.MitigationTimeout)
 					rateLimit.Characteristics = logRateLimit.Characteristics
 					extracted = true
 				} else if managedChallengeRateLimit, ok := rule.Ratelimit.(rulesets.ManagedChallengeRuleRatelimit); ok {
 					rateLimit.Threshold = int(managedChallengeRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(managedChallengeRateLimit.Period)
+					rateLimit.MitigationTimeout = int(managedChallengeRateLimit.MitigationTimeout)
 					rateLimit.Characteristics = managedChallengeRateLimit.Characteristics
 					extracted = true
 				} else if phaseGetRespChallengeRateLimit, ok := rule.Ratelimit.(rulesets.PhaseGetResponseRulesRulesetsChallengeRuleRatelimit); ok {
 					rateLimit.Threshold = int(phaseGetRespChallengeRateLimit.RequestsPerPeriod)
 					rateLimit.Period = int(phaseGetRespChallengeRateLimit.Period)
+					rateLimit.MitigationTimeout = int(phaseGetRespChallengeRateLimit.MitigationTimeout)
 					rateLimit.Characteristics = phaseGetRespChallengeRateLimit.Characteristics
 					extracted = true
 				}
@@ -615,6 +634,23 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 								}
 							}
 						}
+
+						// Try MitigationTimeout field
+						if timeoutField := v.FieldByName("MitigationTimeout"); timeoutField.IsValid() {
+							if timeoutField.CanInterface() {
+								switch val := timeoutField.Interface().(type) {
+								case int64:
+									rateLimit.MitigationTimeout = int(val)
+									extracted = true
+								case int:
+									rateLimit.MitigationTimeout = val
+									extracted = true
+								case float64:
+									rateLimit.MitigationTimeout = int(val)
+									extracted = true
+								}
+							}
+						}
 					}
 
 					// Fallback: Try to extract via map interface
@@ -626,6 +662,10 @@ func (c *CloudflareClient) GetRateLimit(ctx context.Context, zoneID, rateLimitID
 							}
 							if period, ok := rateLimitMap["period"].(float64); ok {
 								rateLimit.Period = int(period)
+								extracted = true
+							}
+							if mitigationTimeout, ok := rateLimitMap["mitigation_timeout"].(float64); ok {
+								rateLimit.MitigationTimeout = int(mitigationTimeout)
 								extracted = true
 							}
 						}

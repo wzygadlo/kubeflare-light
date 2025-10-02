@@ -141,6 +141,11 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		Action:      "block",                  // Default action
 	}
 
+	// Set mitigation timeout from action spec if provided
+	if rateLimit.Spec.Action != nil && rateLimit.Spec.Action.Timeout > 0 {
+		cfRateLimit.MitigationTimeout = rateLimit.Spec.Action.Timeout
+	}
+
 	// Set characteristics (how requests are grouped for rate limiting)
 	if len(rateLimit.Spec.Characteristics) > 0 {
 		characteristics := make([]string, len(rateLimit.Spec.Characteristics))
@@ -741,6 +746,7 @@ func (r *RateLimitReconciler) rateLimitNeedsUpdate(desired, current *cfclient.Ra
 		"desired.Action", desired.Action, "current.Action", current.Action,
 		"desired.Threshold", desired.Threshold, "current.Threshold", current.Threshold,
 		"desired.Period", desired.Period, "current.Period", current.Period,
+		"desired.MitigationTimeout", desired.MitigationTimeout, "current.MitigationTimeout", current.MitigationTimeout,
 		"desired.Disabled", desired.Disabled, "current.Disabled", current.Disabled)
 
 	// Compare key fields that would indicate a change is needed
@@ -762,6 +768,11 @@ func (r *RateLimitReconciler) rateLimitNeedsUpdate(desired, current *cfclient.Ra
 	}
 	if desired.Period != current.Period {
 		r.Log.Info("Rate limit update needed: period mismatch", "desired", desired.Period, "current", current.Period)
+		return true
+	}
+	// Skip MitigationTimeout comparison for log actions - Cloudflare ignores it and returns default
+	if desired.Action != "log" && desired.MitigationTimeout != current.MitigationTimeout {
+		r.Log.Info("Rate limit update needed: mitigation timeout mismatch", "desired", desired.MitigationTimeout, "current", current.MitigationTimeout)
 		return true
 	}
 	if desired.Disabled != current.Disabled {

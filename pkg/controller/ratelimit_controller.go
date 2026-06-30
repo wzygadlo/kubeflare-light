@@ -295,7 +295,9 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 }
 
 func (r *RateLimitReconciler) markRateLimitInvalid(ctx context.Context, rateLimit *cloudflareV1alpha1.RateLimit, reason string, err error) (ctrl.Result, error) {
-	r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, reason, err.Error())
+	if !r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, reason, err.Error()) {
+		return ctrl.Result{}, nil
+	}
 	if updateErr := r.Status().Update(ctx, rateLimit); updateErr != nil {
 		return ctrl.Result{}, updateErr
 	}
@@ -822,8 +824,8 @@ func (r *RateLimitReconciler) rateLimitNeedsUpdate(desired, current *cfclient.Ra
 	return false // No differences found
 }
 
-// updateCondition updates the condition status of the RateLimit resource
-func (r *RateLimitReconciler) updateCondition(rateLimit *cloudflareV1alpha1.RateLimit, conditionType string, status metav1.ConditionStatus, reason, message string) {
+// updateCondition updates the condition status of the RateLimit resource.
+func (r *RateLimitReconciler) updateCondition(rateLimit *cloudflareV1alpha1.RateLimit, conditionType string, status metav1.ConditionStatus, reason, message string) bool {
 	condition := metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
@@ -833,16 +835,19 @@ func (r *RateLimitReconciler) updateCondition(rateLimit *cloudflareV1alpha1.Rate
 	}
 
 	// Find existing condition or append new one
-	found := false
 	for i, existingCondition := range rateLimit.Status.Conditions {
 		if existingCondition.Type == conditionType {
+			if existingCondition.Status == status && existingCondition.Reason == reason && existingCondition.Message == message {
+				return false
+			}
+			if existingCondition.Status == status {
+				condition.LastTransitionTime = existingCondition.LastTransitionTime
+			}
 			rateLimit.Status.Conditions[i] = condition
-			found = true
-			break
+			return true
 		}
 	}
 
-	if !found {
-		rateLimit.Status.Conditions = append(rateLimit.Status.Conditions, condition)
-	}
+	rateLimit.Status.Conditions = append(rateLimit.Status.Conditions, condition)
+	return true
 }

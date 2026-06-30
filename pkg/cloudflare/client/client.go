@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
@@ -863,6 +864,11 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 				Expression:  cloudflare.F(existingRule.Expression),
 				Enabled:     cloudflare.F(existingRule.Enabled),
 			}
+		case "skip":
+			ruleParam, err = c.createSkipRuleParam(existingRule.ID, existingRule.Description, existingRule.Expression, existingRule.Enabled, existingRule.ActionParameters)
+			if err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("cannot preserve unsupported firewall rule action %q for rule %s", existingRule.Action, existingRule.ID)
 		}
@@ -1019,6 +1025,11 @@ func (c *CloudflareClient) UpdateFirewallRule(ctx context.Context, zoneID, ruleI
 					Expression:  cloudflare.F(existingRule.Expression),
 					Enabled:     cloudflare.F(existingRule.Enabled),
 				}
+			case "skip":
+				ruleParam, err = c.createSkipRuleParam(existingRule.ID, existingRule.Description, existingRule.Expression, existingRule.Enabled, existingRule.ActionParameters)
+				if err != nil {
+					return nil, err
+				}
 			default:
 				return nil, fmt.Errorf("cannot preserve unsupported firewall rule action %q for rule %s", existingRule.Action, existingRule.ID)
 			}
@@ -1135,6 +1146,11 @@ func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleI
 				Expression:  cloudflare.F(existingRule.Expression),
 				Enabled:     cloudflare.F(existingRule.Enabled),
 			}
+		case "skip":
+			ruleParam, err = c.createSkipRuleParam(existingRule.ID, existingRule.Description, existingRule.Expression, existingRule.Enabled, existingRule.ActionParameters)
+			if err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("cannot preserve unsupported firewall rule action %q for rule %s", existingRule.Action, existingRule.ID)
 		}
@@ -1231,6 +1247,47 @@ func (c *CloudflareClient) ListFirewallRules(ctx context.Context, zoneID string)
 	}
 
 	return rules, nil
+}
+
+func (c *CloudflareClient) createSkipRuleParam(id, description, expression string, enabled bool, actionParameters interface{}) (rulesets.SkipRuleParam, error) {
+	var params rulesets.SkipRuleActionParameters
+	if typedParams, ok := actionParameters.(rulesets.SkipRuleActionParameters); ok {
+		params = typedParams
+	} else {
+		data, err := json.Marshal(actionParameters)
+		if err != nil {
+			return rulesets.SkipRuleParam{}, fmt.Errorf("cannot preserve skip rule action parameters for rule %s: %w", id, err)
+		}
+		if err := json.Unmarshal(data, &params); err != nil {
+			return rulesets.SkipRuleParam{}, fmt.Errorf("cannot preserve skip rule action parameters for rule %s: %w", id, err)
+		}
+	}
+
+	actionParams := rulesets.SkipRuleActionParametersParam{}
+	if len(params.Phases) > 0 {
+		actionParams.Phases = cloudflare.F(params.Phases)
+	}
+	if len(params.Products) > 0 {
+		actionParams.Products = cloudflare.F(params.Products)
+	}
+	if len(params.Rules) > 0 {
+		actionParams.Rules = cloudflare.F(params.Rules)
+	}
+	if params.Ruleset != "" {
+		actionParams.Ruleset = cloudflare.F(params.Ruleset)
+	}
+	if len(params.Rulesets) > 0 {
+		actionParams.Rulesets = cloudflare.F(params.Rulesets)
+	}
+
+	return rulesets.SkipRuleParam{
+		ID:               cloudflare.F(id),
+		Action:           cloudflare.F(rulesets.SkipRuleActionSkip),
+		ActionParameters: cloudflare.F(actionParams),
+		Description:      cloudflare.F(description),
+		Expression:       cloudflare.F(expression),
+		Enabled:          cloudflare.F(enabled),
+	}, nil
 }
 
 // createRuleParamForAction creates the appropriate rule parameter type based on the action

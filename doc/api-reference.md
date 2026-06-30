@@ -25,7 +25,7 @@ Rate limits control the number of requests from clients to your website or API.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `mode` | string | Action type: `simulate`, `block`, `challenge`, `js_challenge`, `managed_challenge` |
+| `mode` | string | Action type: `log`, `block`, `challenge`, `js_challenge`, `managed_challenge` |
 | `timeout` | int | Duration in seconds for action effect |
 | `response` | [RateLimitActionResponse](#ratelimitactionresponse) | Custom response configuration |
 

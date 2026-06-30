@@ -43,7 +43,7 @@ type RateLimitSpec struct {
 // RateLimitAction defines the action to take when the rate limit is triggered
 type RateLimitAction struct {
 	// Mode is the type of action to perform
-	// Valid values are: "simulate", "block", "challenge", "js_challenge", "managed_challenge"
+	// Valid values are: "log", "block", "challenge", "js_challenge", "managed_challenge"
 	Mode string `json:"mode"`
 
 	// Timeout is the time in seconds for the action to be in effect

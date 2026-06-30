@@ -30,6 +30,15 @@ func TestBuildCloudflareExpressionWrapsCustomExpression(t *testing.T) {
 	}
 }
 
+func TestNormalizeRateLimitActionMapsLegacySimulateToLog(t *testing.T) {
+	if got := normalizeRateLimitAction("simulate"); got != "log" {
+		t.Fatalf("action = %q, want log", got)
+	}
+	if got := normalizeRateLimitAction("block"); got != "block" {
+		t.Fatalf("action = %q, want block", got)
+	}
+}
+
 func TestUpdateConditionSkipsIdenticalCondition(t *testing.T) {
 	wantTime := metav1.Unix(1, 0)
 	rateLimit := &cloudflareV1alpha1.RateLimit{

@@ -97,7 +97,7 @@ spec:
                 properties:
                   mode:
                     type: string
-                    enum: ["simulate", "log", "block", "challenge", "js_challenge", "managed_challenge"]
+                    enum: ["log", "block", "challenge", "js_challenge", "managed_challenge"]
                     description: Action mode
                   timeout:
                     type: integer

@@ -169,7 +169,7 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 
 	// Set action using official 2025 API actions
 	if rateLimit.Spec.Action != nil {
-		cfRateLimit.Action = rateLimit.Spec.Action.Mode // block, challenge, js_challenge, log
+		cfRateLimit.Action = normalizeRateLimitAction(rateLimit.Spec.Action.Mode)
 	}
 
 	// Build expression using available operators. Never write a match-all rule
@@ -302,6 +302,14 @@ func (r *RateLimitReconciler) markRateLimitInvalid(ctx context.Context, rateLimi
 		return ctrl.Result{}, updateErr
 	}
 	return ctrl.Result{}, nil
+}
+
+func normalizeRateLimitAction(action string) string {
+	if action == "simulate" {
+		// ponytail: legacy alias; Cloudflare Rulesets calls simulation "log".
+		return "log"
+	}
+	return action
 }
 
 func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *cloudflareV1alpha1.RateLimit) error {

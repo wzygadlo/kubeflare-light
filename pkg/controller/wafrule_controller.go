@@ -220,9 +220,8 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 			}
 
 			log.V(1).Info("WAF rule is in sync with Cloudflare", "cloudflareId", wafRule.Status.CloudflareID)
-			// No changes needed - return empty result for natural reconcile cycle every 15m
-			log.V(1).Info("WAF rule in sync, using natural reconcile cycle", "wafrule", wafRule.Name)
-			return ctrl.Result{}, nil
+			log.V(1).Info("WAF rule in sync, requeueing for drift check", "wafrule", wafRule.Name)
+			return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
 		}
 	}
 

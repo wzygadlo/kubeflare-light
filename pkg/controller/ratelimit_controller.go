@@ -172,9 +172,20 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		cfRateLimit.Action = rateLimit.Spec.Action.Mode // block, challenge, js_challenge, log
 	}
 
-	// Build expression using available operators
-	if rateLimit.Spec.Match != nil && rateLimit.Spec.Match.Request != nil {
-		cfRateLimit.Expression = r.buildCloudflareExpression(rateLimit.Spec.Match.Request)
+	// Build expression using available operators. Never write a match-all rule
+	// when the user supplied a match we cannot render.
+	if rateLimit.Spec.Match != nil {
+		if rateLimit.Spec.Match.Response != nil {
+			return r.markRateLimitInvalid(ctx, rateLimit, "InvalidMatch", fmt.Errorf("match.response is not supported"))
+		}
+		if rateLimit.Spec.Match.Request == nil {
+			return r.markRateLimitInvalid(ctx, rateLimit, "InvalidMatch", fmt.Errorf("match.request is required when match is set"))
+		}
+		expression, err := r.buildCloudflareExpression(rateLimit.Spec.Match.Request)
+		if err != nil {
+			return r.markRateLimitInvalid(ctx, rateLimit, "InvalidMatch", err)
+		}
+		cfRateLimit.Expression = expression
 	}
 
 	if rateLimit.Status.CloudflareID == "" {
@@ -268,9 +279,8 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 			}
 
 			log.V(1).Info("Rate limit is in sync with Cloudflare", "cloudflareId", rateLimit.Status.CloudflareID)
-			// No changes needed - return empty result for natural reconcile cycle every 15m
-			log.V(1).Info("Rate limit in sync, using natural reconcile cycle", "ratelimit", rateLimit.Name)
-			return ctrl.Result{}, nil
+			log.V(1).Info("Rate limit in sync, requeueing for drift check", "ratelimit", rateLimit.Name)
+			return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
 		}
 	}
 
@@ -282,6 +292,14 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 	}
 
 	return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
+}
+
+func (r *RateLimitReconciler) markRateLimitInvalid(ctx context.Context, rateLimit *cloudflareV1alpha1.RateLimit, reason string, err error) (ctrl.Result, error) {
+	r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, reason, err.Error())
+	if updateErr := r.Status().Update(ctx, rateLimit); updateErr != nil {
+		return ctrl.Result{}, updateErr
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *cloudflareV1alpha1.RateLimit) error {
@@ -308,7 +326,7 @@ func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *
 
 // buildCloudflareExpression builds a Cloudflare expression from CRD fields
 // Uses official 2025 Cloudflare operators and syntax with proper input sanitization
-func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.RateLimitMatchRequest) string {
+func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.RateLimitMatchRequest) (string, error) {
 	var expressions []string
 
 	// === URL Operators (All Plans) ===
@@ -584,12 +602,12 @@ func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.
 
 	// Combine all expressions with AND
 	if len(expressions) == 0 {
-		return "true" // Default: match all requests
+		return "", fmt.Errorf("match.request must contain at least one supported predicate")
 	}
 	if len(expressions) == 1 {
-		return expressions[0]
+		return expressions[0], nil
 	}
-	return strings.Join(expressions, " and ")
+	return strings.Join(expressions, " and "), nil
 }
 
 // Helper functions for expression building

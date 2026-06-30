@@ -764,6 +764,7 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 			Action:      cloudflare.F(rulesets.BlockRuleActionBlock),
 			Description: cloudflare.F(rule.Description),
 			Expression:  cloudflare.F(rule.Expression),
+			Enabled:     cloudflare.F(!rule.Paused),
 		}
 	case "challenge":
 		// Use BlockRuleParam with challenge action
@@ -771,6 +772,7 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 			Action:      cloudflare.F(rulesets.BlockRuleAction("challenge")),
 			Description: cloudflare.F(rule.Description),
 			Expression:  cloudflare.F(rule.Expression),
+			Enabled:     cloudflare.F(!rule.Paused),
 		}
 	case "js_challenge":
 		// Use BlockRuleParam with js_challenge action
@@ -778,18 +780,21 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 			Action:      cloudflare.F(rulesets.BlockRuleAction("js_challenge")),
 			Description: cloudflare.F(rule.Description),
 			Expression:  cloudflare.F(rule.Expression),
+			Enabled:     cloudflare.F(!rule.Paused),
 		}
 	case "managed_challenge":
 		newRuleParam = rulesets.ManagedChallengeRuleParam{
 			Action:      cloudflare.F(rulesets.ManagedChallengeRuleActionManagedChallenge),
 			Description: cloudflare.F(rule.Description),
 			Expression:  cloudflare.F(rule.Expression),
+			Enabled:     cloudflare.F(!rule.Paused),
 		}
 	case "log":
 		newRuleParam = rulesets.LogRuleParam{
 			Action:      cloudflare.F(rulesets.LogRuleActionLog),
 			Description: cloudflare.F(rule.Description),
 			Expression:  cloudflare.F(rule.Expression),
+			Enabled:     cloudflare.F(!rule.Paused),
 		}
 	default:
 		return nil, fmt.Errorf("unsupported action: %s", rule.Action)
@@ -859,8 +864,7 @@ func (c *CloudflareClient) CreateFirewallRule(ctx context.Context, zoneID string
 				Enabled:     cloudflare.F(existingRule.Enabled),
 			}
 		default:
-			// Skip unsupported rule types
-			continue
+			return nil, fmt.Errorf("cannot preserve unsupported firewall rule action %q for rule %s", existingRule.Action, existingRule.ID)
 		}
 
 		existingRules = append(existingRules, ruleParam)
@@ -1016,8 +1020,7 @@ func (c *CloudflareClient) UpdateFirewallRule(ctx context.Context, zoneID, ruleI
 					Enabled:     cloudflare.F(existingRule.Enabled),
 				}
 			default:
-				// Skip unsupported rule types
-				continue
+				return nil, fmt.Errorf("cannot preserve unsupported firewall rule action %q for rule %s", existingRule.Action, existingRule.ID)
 			}
 		}
 
@@ -1133,8 +1136,7 @@ func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleI
 				Enabled:     cloudflare.F(existingRule.Enabled),
 			}
 		default:
-			// Skip unsupported rule types
-			continue
+			return fmt.Errorf("cannot preserve unsupported firewall rule action %q for rule %s", existingRule.Action, existingRule.ID)
 		}
 
 		remainingRules = append(remainingRules, ruleParam)

@@ -46,6 +46,7 @@ spec:
                 properties:
                   request:
                     type: object
+                    x-kubernetes-preserve-unknown-fields: true
                     properties:
                       methods:
                         type: array
@@ -60,6 +61,9 @@ spec:
                       urlPattern:
                         type: string
                         description: URL pattern to match
+                      customExpression:
+                        type: string
+                        description: Raw Cloudflare expression to match
                   response:
                     type: object
                     properties:
@@ -84,8 +88,8 @@ spec:
                 properties:
                   mode:
                     type: string
-                    enum: ["simulate", "block", "challenge", "js_challenge", "managed_challenge"]
-                    description: Action mode
+                    enum: ["log", "simulate", "block", "challenge", "js_challenge", "managed_challenge"]
+                    description: 'Action mode. "simulate" is a deprecated alias for "log", kept so existing stored objects remain valid; the controller normalizes it to "log" at reconcile time.'
                   timeout:
                     type: integer
                     description: Timeout duration in seconds for ban action

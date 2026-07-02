@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -137,7 +138,6 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 		Disabled:    rateLimit.Spec.Disabled,
 		Threshold:   rateLimit.Spec.Threshold, // maps to requests_per_period
 		Period:      rateLimit.Spec.Period,    // official period parameter
-		Expression:  "true",                   // Default - will be built below
 		Action:      "block",                  // Default action
 	}
 
@@ -169,13 +169,25 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 
 	// Set action using official 2025 API actions
 	if rateLimit.Spec.Action != nil {
-		cfRateLimit.Action = rateLimit.Spec.Action.Mode // block, challenge, js_challenge, log
+		cfRateLimit.Action = normalizeRateLimitAction(rateLimit.Spec.Action.Mode)
 	}
 
-	// Build expression using available operators
-	if rateLimit.Spec.Match != nil && rateLimit.Spec.Match.Request != nil {
-		cfRateLimit.Expression = r.buildCloudflareExpression(rateLimit.Spec.Match.Request)
+	// Build expression using available operators. A match is required: never write a
+	// match-all rule, whether the user omitted match entirely or supplied one we can't render.
+	if rateLimit.Spec.Match == nil {
+		return r.markRateLimitInvalid(ctx, rateLimit, "InvalidMatch", fmt.Errorf("match is required"))
 	}
+	if rateLimit.Spec.Match.Response != nil {
+		return r.markRateLimitInvalid(ctx, rateLimit, "InvalidMatch", fmt.Errorf("match.response is not supported"))
+	}
+	if rateLimit.Spec.Match.Request == nil {
+		return r.markRateLimitInvalid(ctx, rateLimit, "InvalidMatch", fmt.Errorf("match.request is required when match is set"))
+	}
+	expression, err := r.buildCloudflareExpression(rateLimit.Spec.Match.Request)
+	if err != nil {
+		return r.markRateLimitInvalid(ctx, rateLimit, "InvalidMatch", err)
+	}
+	cfRateLimit.Expression = expression
 
 	if rateLimit.Status.CloudflareID == "" {
 		// Create new rate limit in Cloudflare
@@ -268,9 +280,8 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 			}
 
 			log.V(1).Info("Rate limit is in sync with Cloudflare", "cloudflareId", rateLimit.Status.CloudflareID)
-			// No changes needed - return empty result for natural reconcile cycle every 15m
-			log.V(1).Info("Rate limit in sync, using natural reconcile cycle", "ratelimit", rateLimit.Name)
-			return ctrl.Result{}, nil
+			log.V(1).Info("Rate limit in sync, requeueing for drift check", "ratelimit", rateLimit.Name)
+			return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
 		}
 	}
 
@@ -282,6 +293,24 @@ func (r *RateLimitReconciler) reconcileRateLimit(ctx context.Context, rateLimit 
 	}
 
 	return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
+}
+
+// markRateLimitInvalid records why the spec can't be reconciled and requeues at the normal
+// drift-check interval, so a RateLimit doesn't get stuck forever with a stale Cloudflare rule
+// once its spec becomes invalid (e.g. an edit, or a pre-existing match this build now rejects).
+func (r *RateLimitReconciler) markRateLimitInvalid(ctx context.Context, rateLimit *cloudflareV1alpha1.RateLimit, reason string, err error) (ctrl.Result, error) {
+	if !r.updateCondition(rateLimit, "Ready", metav1.ConditionFalse, reason, err.Error()) {
+		return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: r.ReconcileInterval}, r.Status().Update(ctx, rateLimit)
+}
+
+func normalizeRateLimitAction(action string) string {
+	if action == "simulate" {
+		// Deprecated alias: Cloudflare Rulesets calls simulation "log".
+		return "log"
+	}
+	return action
 }
 
 func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *cloudflareV1alpha1.RateLimit) error {
@@ -308,7 +337,7 @@ func (r *RateLimitReconciler) finalizeRateLimit(ctx context.Context, rateLimit *
 
 // buildCloudflareExpression builds a Cloudflare expression from CRD fields
 // Uses official 2025 Cloudflare operators and syntax with proper input sanitization
-func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.RateLimitMatchRequest) string {
+func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.RateLimitMatchRequest) (string, error) {
 	var expressions []string
 
 	// === URL Operators (All Plans) ===
@@ -410,23 +439,23 @@ func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.
 	// === Header Matching ===
 	if len(req.Headers) > 0 {
 		for headerName, rule := range req.Headers {
-			expr := r.buildHeaderExpression(headerName, rule)
-			if expr != "" {
-				expressions = append(expressions, expr)
+			expr, err := r.buildHeaderExpression(headerName, rule)
+			if err != nil {
+				return "", fmt.Errorf("invalid header match %q: %w", headerName, err)
 			}
+			expressions = append(expressions, expr)
 		}
 	}
 	if len(req.HeadersAny) > 0 {
 		var headerExprs []string
 		for headerName, rule := range req.HeadersAny {
-			expr := r.buildHeaderExpression(headerName, rule)
-			if expr != "" {
-				headerExprs = append(headerExprs, expr)
+			expr, err := r.buildHeaderExpression(headerName, rule)
+			if err != nil {
+				return "", fmt.Errorf("invalid headersAny match %q: %w", headerName, err)
 			}
+			headerExprs = append(headerExprs, expr)
 		}
-		if len(headerExprs) > 0 {
-			expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(headerExprs, " or ")))
-		}
+		expressions = append(expressions, fmt.Sprintf("(%s)", strings.Join(headerExprs, " or ")))
 	}
 
 	// Special headers
@@ -451,20 +480,22 @@ func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.
 	// === Cookie Matching ===
 	if len(req.Cookies) > 0 {
 		for cookieName, rule := range req.Cookies {
-			expr := r.buildCookieExpression(cookieName, rule)
-			if expr != "" {
-				expressions = append(expressions, expr)
+			expr, err := r.buildCookieExpression(cookieName, rule)
+			if err != nil {
+				return "", fmt.Errorf("invalid cookie match %q: %w", cookieName, err)
 			}
+			expressions = append(expressions, expr)
 		}
 	}
 
 	// === Query Parameters ===
 	if len(req.QueryParams) > 0 {
 		for paramName, rule := range req.QueryParams {
-			expr := r.buildQueryParamExpression(paramName, rule)
-			if expr != "" {
-				expressions = append(expressions, expr)
+			expr, err := r.buildQueryParamExpression(paramName, rule)
+			if err != nil {
+				return "", fmt.Errorf("invalid query param match %q: %w", paramName, err)
 			}
+			expressions = append(expressions, expr)
 		}
 	}
 
@@ -515,10 +546,11 @@ func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.
 
 	// === Request Body (Enterprise) ===
 	if req.BodySize != "" {
-		expr := r.buildComparisonExpression("http.request.body.size", req.BodySize)
-		if expr != "" {
-			expressions = append(expressions, expr)
+		expr, err := r.buildComparisonExpression("http.request.body.size", req.BodySize)
+		if err != nil {
+			return "", fmt.Errorf("invalid bodySize match: %w", err)
 		}
+		expressions = append(expressions, expr)
 	}
 	if req.BodyContains != "" {
 		expressions = append(expressions, fmt.Sprintf("(contains(http.request.body.raw, \"%s\"))",
@@ -526,27 +558,30 @@ func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.
 	}
 	if len(req.BodyFormFields) > 0 {
 		for fieldName, rule := range req.BodyFormFields {
-			expr := r.buildFormFieldExpression(fieldName, rule)
-			if expr != "" {
-				expressions = append(expressions, expr)
+			expr, err := r.buildFormFieldExpression(fieldName, rule)
+			if err != nil {
+				return "", fmt.Errorf("invalid body form field match %q: %w", fieldName, err)
 			}
+			expressions = append(expressions, expr)
 		}
 	}
 	if len(req.BodyJSONFields) > 0 {
 		for jsonPath, rule := range req.BodyJSONFields {
-			expr := r.buildJSONFieldExpression(jsonPath, rule)
-			if expr != "" {
-				expressions = append(expressions, expr)
+			expr, err := r.buildJSONFieldExpression(jsonPath, rule)
+			if err != nil {
+				return "", fmt.Errorf("invalid body JSON field match %q: %w", jsonPath, err)
 			}
+			expressions = append(expressions, expr)
 		}
 	}
 
 	// === Bot Management (Enterprise) ===
 	if req.BotScore != "" {
-		expr := r.buildComparisonExpression("cf.bot_management.score", req.BotScore)
-		if expr != "" {
-			expressions = append(expressions, expr)
+		expr, err := r.buildComparisonExpression("cf.bot_management.score", req.BotScore)
+		if err != nil {
+			return "", fmt.Errorf("invalid botScore match: %w", err)
 		}
+		expressions = append(expressions, expr)
 	}
 	if req.VerifiedBot != nil {
 		if *req.VerifiedBot {
@@ -572,24 +607,23 @@ func (r *RateLimitReconciler) buildCloudflareExpression(req *cloudflareV1alpha1.
 
 	// === Custom Expression ===
 	if req.CustomExpression != "" {
-		// Validate and wrap custom expression
+		// Always wrap in parens: this expression is AND-joined with every other predicate
+		// below, and an unwrapped top-level "or" would escape that conjunction (Cloudflare's
+		// rules language binds "and" tighter than "or", same as most boolean expression syntax).
 		customExpr := strings.TrimSpace(req.CustomExpression)
 		if customExpr != "" {
-			if !strings.HasPrefix(customExpr, "(") {
-				customExpr = "(" + customExpr + ")"
-			}
-			expressions = append(expressions, customExpr)
+			expressions = append(expressions, "("+customExpr+")")
 		}
 	}
 
 	// Combine all expressions with AND
 	if len(expressions) == 0 {
-		return "true" // Default: match all requests
+		return "", fmt.Errorf("match.request must contain at least one supported predicate")
 	}
 	if len(expressions) == 1 {
-		return expressions[0]
+		return expressions[0], nil
 	}
-	return strings.Join(expressions, " and ")
+	return strings.Join(expressions, " and "), nil
 }
 
 // Helper functions for expression building
@@ -598,139 +632,159 @@ func (r *RateLimitReconciler) sanitizeString(input string) string {
 	return strings.ReplaceAll(input, "\"", "\\\"")
 }
 
-func (r *RateLimitReconciler) buildHeaderExpression(headerName, rule string) string {
-	parts := strings.SplitN(rule, ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-
-	operator, value := parts[0], parts[1]
+func (r *RateLimitReconciler) buildHeaderExpression(headerName, rule string) (string, error) {
 	headerName = r.sanitizeString(strings.ToLower(headerName))
+	if rule == "exists" {
+		return fmt.Sprintf("(http.request.headers[\"%s\"][0] ne \"\")", headerName), nil
+	}
+
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("rule %q must be \"exists\" or in \"operator:value\" form", rule)
+	}
+
+	operator, value := parts[0], parts[1]
 	value = r.sanitizeString(value)
 
 	switch operator {
 	case "eq":
-		return fmt.Sprintf("(http.request.headers[\"%s\"][0] eq \"%s\")", headerName, value)
+		return fmt.Sprintf("(http.request.headers[\"%s\"][0] eq \"%s\")", headerName, value), nil
 	case "contains":
-		return fmt.Sprintf("(contains(http.request.headers[\"%s\"][0], \"%s\"))", headerName, value)
+		return fmt.Sprintf("(contains(http.request.headers[\"%s\"][0], \"%s\"))", headerName, value), nil
 	case "exists":
-		return fmt.Sprintf("(http.request.headers[\"%s\"][0] ne \"\")", headerName)
+		return fmt.Sprintf("(http.request.headers[\"%s\"][0] ne \"\")", headerName), nil
 	default:
-		return ""
+		return "", fmt.Errorf("unsupported operator %q (valid: eq, contains, exists)", operator)
 	}
 }
 
-func (r *RateLimitReconciler) buildCookieExpression(cookieName, rule string) string {
-	parts := strings.SplitN(rule, ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-
-	operator, value := parts[0], parts[1]
+func (r *RateLimitReconciler) buildCookieExpression(cookieName, rule string) (string, error) {
 	cookieName = r.sanitizeString(cookieName)
+	if rule == "exists" {
+		return fmt.Sprintf("(http.cookie[\"%s\"] ne \"\")", cookieName), nil
+	}
+
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("rule %q must be \"exists\" or in \"operator:value\" form", rule)
+	}
+
+	operator, value := parts[0], parts[1]
 	value = r.sanitizeString(value)
 
 	switch operator {
 	case "eq":
-		return fmt.Sprintf("(http.cookie[\"%s\"] eq \"%s\")", cookieName, value)
+		return fmt.Sprintf("(http.cookie[\"%s\"] eq \"%s\")", cookieName, value), nil
 	case "contains":
-		return fmt.Sprintf("(contains(http.cookie[\"%s\"], \"%s\"))", cookieName, value)
+		return fmt.Sprintf("(contains(http.cookie[\"%s\"], \"%s\"))", cookieName, value), nil
 	case "exists":
-		return fmt.Sprintf("(http.cookie[\"%s\"] ne \"\")", cookieName)
+		return fmt.Sprintf("(http.cookie[\"%s\"] ne \"\")", cookieName), nil
 	default:
-		return ""
+		return "", fmt.Errorf("unsupported operator %q (valid: eq, contains, exists)", operator)
 	}
 }
 
-func (r *RateLimitReconciler) buildQueryParamExpression(paramName, rule string) string {
-	parts := strings.SplitN(rule, ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-
-	operator, value := parts[0], parts[1]
+func (r *RateLimitReconciler) buildQueryParamExpression(paramName, rule string) (string, error) {
 	paramName = r.sanitizeString(paramName)
+	if rule == "exists" {
+		return fmt.Sprintf("(http.request.uri.args[\"%s\"][0] ne \"\")", paramName), nil
+	}
+
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("rule %q must be \"exists\" or in \"operator:value\" form", rule)
+	}
+
+	operator, value := parts[0], parts[1]
 	value = r.sanitizeString(value)
 
 	switch operator {
 	case "eq":
-		return fmt.Sprintf("(http.request.uri.args[\"%s\"][0] eq \"%s\")", paramName, value)
+		return fmt.Sprintf("(http.request.uri.args[\"%s\"][0] eq \"%s\")", paramName, value), nil
 	case "contains":
-		return fmt.Sprintf("(contains(http.request.uri.args[\"%s\"][0], \"%s\"))", paramName, value)
+		return fmt.Sprintf("(contains(http.request.uri.args[\"%s\"][0], \"%s\"))", paramName, value), nil
 	case "exists":
-		return fmt.Sprintf("(http.request.uri.args[\"%s\"][0] ne \"\")", paramName)
+		return fmt.Sprintf("(http.request.uri.args[\"%s\"][0] ne \"\")", paramName), nil
 	default:
-		return ""
+		return "", fmt.Errorf("unsupported operator %q (valid: eq, contains, exists)", operator)
 	}
 }
 
-func (r *RateLimitReconciler) buildComparisonExpression(field, rule string) string {
+func (r *RateLimitReconciler) buildComparisonExpression(field, rule string) (string, error) {
 	parts := strings.SplitN(rule, ":", 2)
 	if len(parts) != 2 {
-		return ""
+		return "", fmt.Errorf("rule %q must be in \"operator:value\" form", rule)
 	}
 
 	operator, value := parts[0], parts[1]
 
 	switch operator {
 	case "eq":
-		return fmt.Sprintf("(%s eq %s)", field, value)
+		return fmt.Sprintf("(%s eq %s)", field, value), nil
 	case "ne":
-		return fmt.Sprintf("(%s ne %s)", field, value)
+		return fmt.Sprintf("(%s ne %s)", field, value), nil
 	case "gt":
-		return fmt.Sprintf("(%s gt %s)", field, value)
+		return fmt.Sprintf("(%s gt %s)", field, value), nil
 	case "ge":
-		return fmt.Sprintf("(%s ge %s)", field, value)
+		return fmt.Sprintf("(%s ge %s)", field, value), nil
 	case "lt":
-		return fmt.Sprintf("(%s lt %s)", field, value)
+		return fmt.Sprintf("(%s lt %s)", field, value), nil
 	case "le":
-		return fmt.Sprintf("(%s le %s)", field, value)
+		return fmt.Sprintf("(%s le %s)", field, value), nil
 	default:
-		return ""
+		return "", fmt.Errorf("unsupported operator %q (valid: eq, ne, gt, ge, lt, le)", operator)
 	}
 }
 
-func (r *RateLimitReconciler) buildFormFieldExpression(fieldName, rule string) string {
-	parts := strings.SplitN(rule, ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-
-	operator, value := parts[0], parts[1]
+func (r *RateLimitReconciler) buildFormFieldExpression(fieldName, rule string) (string, error) {
 	fieldName = r.sanitizeString(fieldName)
-	value = r.sanitizeString(value)
-
-	switch operator {
-	case "eq":
-		return fmt.Sprintf("(http.request.body.form[\"%s\"][0] eq \"%s\")", fieldName, value)
-	case "contains":
-		return fmt.Sprintf("(contains(http.request.body.form[\"%s\"][0], \"%s\"))", fieldName, value)
-	case "exists":
-		return fmt.Sprintf("(http.request.body.form[\"%s\"][0] ne \"\")", fieldName)
-	default:
-		return ""
+	if rule == "exists" {
+		return fmt.Sprintf("(http.request.body.form[\"%s\"][0] ne \"\")", fieldName), nil
 	}
-}
 
-func (r *RateLimitReconciler) buildJSONFieldExpression(jsonPath, rule string) string {
 	parts := strings.SplitN(rule, ":", 2)
 	if len(parts) != 2 {
-		return ""
+		return "", fmt.Errorf("rule %q must be \"exists\" or in \"operator:value\" form", rule)
 	}
 
 	operator, value := parts[0], parts[1]
-	jsonPath = r.sanitizeString(jsonPath)
 	value = r.sanitizeString(value)
 
 	switch operator {
 	case "eq":
-		return fmt.Sprintf("(lookup_json_string(http.request.body.raw, \"%s\") eq \"%s\")", jsonPath, value)
+		return fmt.Sprintf("(http.request.body.form[\"%s\"][0] eq \"%s\")", fieldName, value), nil
 	case "contains":
-		return fmt.Sprintf("(contains(lookup_json_string(http.request.body.raw, \"%s\"), \"%s\"))", jsonPath, value)
+		return fmt.Sprintf("(contains(http.request.body.form[\"%s\"][0], \"%s\"))", fieldName, value), nil
 	case "exists":
-		return fmt.Sprintf("(lookup_json_string(http.request.body.raw, \"%s\") ne \"\")", jsonPath)
+		return fmt.Sprintf("(http.request.body.form[\"%s\"][0] ne \"\")", fieldName), nil
 	default:
-		return ""
+		return "", fmt.Errorf("unsupported operator %q (valid: eq, contains, exists)", operator)
+	}
+}
+
+func (r *RateLimitReconciler) buildJSONFieldExpression(jsonPath, rule string) (string, error) {
+	jsonPath = r.sanitizeString(jsonPath)
+	if rule == "exists" {
+		return fmt.Sprintf("(lookup_json_string(http.request.body.raw, \"%s\") ne \"\")", jsonPath), nil
+	}
+
+	parts := strings.SplitN(rule, ":", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("rule %q must be \"exists\" or in \"operator:value\" form", rule)
+	}
+
+	operator, value := parts[0], parts[1]
+	value = r.sanitizeString(value)
+
+	switch operator {
+	case "eq":
+		return fmt.Sprintf("(lookup_json_string(http.request.body.raw, \"%s\") eq \"%s\")", jsonPath, value), nil
+	case "contains":
+		return fmt.Sprintf("(contains(lookup_json_string(http.request.body.raw, \"%s\"), \"%s\"))", jsonPath, value), nil
+	case "exists":
+		return fmt.Sprintf("(lookup_json_string(http.request.body.raw, \"%s\") ne \"\")", jsonPath), nil
+	default:
+		return "", fmt.Errorf("unsupported operator %q (valid: eq, contains, exists)", operator)
 	}
 }
 
@@ -804,27 +858,14 @@ func (r *RateLimitReconciler) rateLimitNeedsUpdate(desired, current *cfclient.Ra
 	return false // No differences found
 }
 
-// updateCondition updates the condition status of the RateLimit resource
-func (r *RateLimitReconciler) updateCondition(rateLimit *cloudflareV1alpha1.RateLimit, conditionType string, status metav1.ConditionStatus, reason, message string) {
-	condition := metav1.Condition{
-		Type:               conditionType,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: metav1.Now(),
-	}
-
-	// Find existing condition or append new one
-	found := false
-	for i, existingCondition := range rateLimit.Status.Conditions {
-		if existingCondition.Type == conditionType {
-			rateLimit.Status.Conditions[i] = condition
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		rateLimit.Status.Conditions = append(rateLimit.Status.Conditions, condition)
-	}
+// updateCondition updates the condition status of the RateLimit resource, returning whether
+// anything changed. Delegates to apimachinery so persistent errors don't rewrite
+// LastTransitionTime (and trigger a status write) on every identical retry.
+func (r *RateLimitReconciler) updateCondition(rateLimit *cloudflareV1alpha1.RateLimit, conditionType string, status metav1.ConditionStatus, reason, message string) bool {
+	return apimeta.SetStatusCondition(&rateLimit.Status.Conditions, metav1.Condition{
+		Type:    conditionType,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
 }

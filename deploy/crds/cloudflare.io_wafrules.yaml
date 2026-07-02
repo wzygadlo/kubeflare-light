@@ -49,7 +49,7 @@ spec:
                 description: Wireshark-like filter expression
               action:
                 type: string
-                enum: ["allow", "block", "challenge", "js_challenge", "managed_challenge", "log", "skip"]
+                enum: ["block", "challenge", "js_challenge", "managed_challenge", "log", "skip"]
                 description: Action to take when the rule matches
               priority:
                 type: integer

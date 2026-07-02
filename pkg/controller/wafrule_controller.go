@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -129,6 +130,12 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 	// Convert Kubernetes WAFRule to Cloudflare WAF Rule
 	cfWAFRule := r.convertToCloudflareWAFRule(wafRule)
 
+	// Cloudflare only honors a custom response for the "block" action; reject rather than
+	// silently ignore a response configured on any other action.
+	if cfWAFRule.Response != nil && wafRule.Spec.Action != "block" {
+		return r.markWAFRuleInvalid(ctx, wafRule, "InvalidActionParameters", fmt.Errorf("actionParameters.response is only supported for action \"block\", got %q", wafRule.Spec.Action))
+	}
+
 	if wafRule.Status.CloudflareID == "" {
 		// Create new WAF rule in Cloudflare
 		createdRule, err := r.CF.CreateFirewallRule(ctx, zoneID, cfWAFRule)
@@ -235,6 +242,15 @@ func (r *WAFRuleReconciler) reconcileWAFRule(ctx context.Context, wafRule *cloud
 	return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
 }
 
+// markWAFRuleInvalid records why the spec can't be reconciled and requeues at the normal
+// drift-check interval, so a WAFRule doesn't get stuck forever once its spec becomes invalid.
+func (r *WAFRuleReconciler) markWAFRuleInvalid(ctx context.Context, wafRule *cloudflareV1alpha1.WAFRule, reason string, err error) (ctrl.Result, error) {
+	if !r.updateWAFCondition(wafRule, "Ready", metav1.ConditionFalse, reason, err.Error()) {
+		return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: r.ReconcileInterval}, r.Status().Update(ctx, wafRule)
+}
+
 func (r *WAFRuleReconciler) finalizeWAFRule(ctx context.Context, wafRule *cloudflareV1alpha1.WAFRule) error {
 	log := r.Log.WithValues("wafrule", wafRule.Name)
 
@@ -276,26 +292,27 @@ func (r *WAFRuleReconciler) convertToCloudflareWAFRule(wafRule *cloudflareV1alph
 		rule.Priority = wafRule.Spec.Priority
 	}
 
+	if wafRule.Spec.ActionParameters != nil && wafRule.Spec.ActionParameters.Response != nil {
+		rule.Response = &cfclient.FirewallRuleResponse{
+			StatusCode:  wafRule.Spec.ActionParameters.Response.StatusCode,
+			ContentType: wafRule.Spec.ActionParameters.Response.ContentType,
+			Content:     wafRule.Spec.ActionParameters.Response.Content,
+		}
+	}
+
 	return rule
 }
 
-func (r *WAFRuleReconciler) updateWAFCondition(wafRule *cloudflareV1alpha1.WAFRule, conditionType string, status metav1.ConditionStatus, reason, message string) {
-	condition := metav1.Condition{
-		Type:               conditionType,
-		Status:             status,
-		LastTransitionTime: metav1.Now(),
-		Reason:             reason,
-		Message:            message,
-	}
-
-	// Find and update existing condition or append new one
-	for i, existingCondition := range wafRule.Status.Conditions {
-		if existingCondition.Type == conditionType {
-			wafRule.Status.Conditions[i] = condition
-			return
-		}
-	}
-	wafRule.Status.Conditions = append(wafRule.Status.Conditions, condition)
+// updateWAFCondition updates the condition status of the WAFRule resource, returning whether
+// anything changed. Delegates to apimachinery so persistent errors don't rewrite
+// LastTransitionTime (and trigger a status write) on every identical retry.
+func (r *WAFRuleReconciler) updateWAFCondition(wafRule *cloudflareV1alpha1.WAFRule, conditionType string, status metav1.ConditionStatus, reason, message string) bool {
+	return apimeta.SetStatusCondition(&wafRule.Status.Conditions, metav1.Condition{
+		Type:    conditionType,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
 }
 
 // wafRuleNeedsUpdate compares desired state with current Cloudflare state
@@ -329,7 +346,19 @@ func (r *WAFRuleReconciler) wafRuleNeedsUpdate(desired, current *cfclient.Firewa
 		r.Log.Info("WAF rule update needed: paused mismatch", "desired", desired.Paused, "current", current.Paused)
 		return true
 	}
+	if !firewallRuleResponsesEqual(desired.Response, current.Response) {
+		r.Log.Info("WAF rule update needed: response mismatch", "desired", desired.Response, "current", current.Response)
+		return true
+	}
 
 	r.Log.V(1).Info("WAF rule no update needed: all fields match")
 	return false // No differences found
+}
+
+// firewallRuleResponsesEqual compares two possibly-nil custom responses.
+func firewallRuleResponsesEqual(a, b *cfclient.FirewallRuleResponse) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

@@ -88,8 +88,8 @@ spec:
                 properties:
                   mode:
                     type: string
-                    enum: ["log", "block", "challenge", "js_challenge", "managed_challenge"]
-                    description: Action mode
+                    enum: ["log", "simulate", "block", "challenge", "js_challenge", "managed_challenge"]
+                    description: 'Action mode. "simulate" is a deprecated alias for "log", kept so existing stored objects remain valid; the controller normalizes it to "log" at reconcile time.'
                   timeout:
                     type: integer
                     description: Timeout duration in seconds for ban action

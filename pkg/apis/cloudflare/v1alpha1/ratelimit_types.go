@@ -44,6 +44,7 @@ type RateLimitSpec struct {
 type RateLimitAction struct {
 	// Mode is the type of action to perform
 	// Valid values are: "log", "block", "challenge", "js_challenge", "managed_challenge"
+	// "simulate" is accepted as a deprecated alias for "log" and normalized at reconcile time.
 	Mode string `json:"mode"`
 
 	// Timeout is the time in seconds for the action to be in effect

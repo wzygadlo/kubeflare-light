@@ -1,5 +1,5 @@
 # Build the manager binary
-# (no-op comment: retriggers the vidiq-infra submodule-triggered ECR build)
+# (no-op comment: retriggers the vidiq-infra submodule-triggered ECR build, attempt 2)
 FROM golang:1.24.4-alpine AS builder
 
 WORKDIR /workspace

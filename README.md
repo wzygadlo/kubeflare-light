@@ -117,7 +117,7 @@ kubectl get ratelimits,wafrules -A
 
 - `zoneId` - Domain name or zone ID (resolved via ConfigMap)
 - `threshold` - Requests per period (1-1000000)
-- `period` - Time period in seconds (10, 60, 120, 300, 600, 3600)
+- `period` - Time period in seconds. Supported values: 10, 15, 20, 30, 40, 45, 60, 90, 120, 180, 240, 300, 480, 600, 900, 1200, 1800, 2400, 3600 (max 1 hour; availability depends on plan: Free=10s only, Pro=up to 60s, Business=up to 600s, Enterprise=up to 3600s)
 - `action.mode` - "log", "block", "challenge", "js_challenge", "managed_challenge"
 
 ### URL Matching

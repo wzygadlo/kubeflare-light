@@ -158,8 +158,55 @@ func (c *CloudflareClient) GetZoneByName(ctx context.Context, zoneName string) (
 	return &zonesList.Result[0], nil
 }
 
-// CreateRateLimit creates a new rate limit rule using rulesets API
-// CRITICAL: This now uses the modern rulesets API to replace the deprecated Rate Limiting API (sunset June 15, 2025)
+func validateRuleAction(action string) error {
+	switch action {
+	case "log", "block", "challenge", "js_challenge", "managed_challenge":
+		return nil
+	default:
+		return fmt.Errorf("unsupported action type: %s (valid: log, block, challenge, js_challenge, managed_challenge)", action)
+	}
+}
+
+func rateLimitConfig(rateLimit RateLimit) rulesets.BlockRuleRatelimitParam {
+	characteristics := rateLimit.Characteristics
+	if len(characteristics) == 0 {
+		characteristics = []string{"ip.src", "cf.colo.id"}
+	}
+	return rulesets.BlockRuleRatelimitParam{
+		Characteristics:   cloudflare.F(characteristics),
+		Period:            cloudflare.F(int64(rateLimit.Period)),
+		RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
+		MitigationTimeout: cloudflare.F(int64(rateLimit.MitigationTimeout)),
+	}
+}
+
+func newRateLimitRuleBody(rateLimit RateLimit) (rulesets.RuleNewParamsBodyUnion, error) {
+	if err := validateRuleAction(rateLimit.Action); err != nil {
+		return nil, err
+	}
+	return rulesets.RuleNewParamsBody{
+		Action:      cloudflare.F(rulesets.RuleNewParamsBodyAction(rateLimit.Action)),
+		Description: cloudflare.F(rateLimit.Description),
+		Expression:  cloudflare.F(rateLimit.Expression),
+		Enabled:     cloudflare.F(!rateLimit.Disabled),
+		Ratelimit:   cloudflare.F[interface{}](rateLimitConfig(rateLimit)),
+	}, nil
+}
+
+func editRateLimitRuleBody(rateLimit RateLimit) (rulesets.RuleEditParamsBodyUnion, error) {
+	if err := validateRuleAction(rateLimit.Action); err != nil {
+		return nil, err
+	}
+	return rulesets.RuleEditParamsBody{
+		Action:      cloudflare.F(rulesets.RuleEditParamsBodyAction(rateLimit.Action)),
+		Description: cloudflare.F(rateLimit.Description),
+		Expression:  cloudflare.F(rateLimit.Expression),
+		Enabled:     cloudflare.F(!rateLimit.Disabled),
+		Ratelimit:   cloudflare.F[interface{}](rateLimitConfig(rateLimit)),
+	}, nil
+}
+
+// CreateRateLimit creates a single rule without replacing its ruleset siblings.
 func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, rateLimit RateLimit) (*RateLimit, error) {
 	// Wait for rate limiter before making API call
 	if err := c.waitForRateLimit(ctx); err != nil {
@@ -201,100 +248,21 @@ func (c *CloudflareClient) CreateRateLimit(ctx context.Context, zoneID string, r
 		return nil, fmt.Errorf("failed to get rate limit ruleset: %w", err)
 	}
 
-	// Create a new rate limiting rule using the correct parameter type for the action
-	newRule, err := c.createRuleParamForAction(rateLimit.Action, "", rateLimit.Description, rateLimit.Expression, !rateLimit.Disabled)
+	body, err := newRateLimitRuleBody(rateLimit)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create rule param for action %s: %w", rateLimit.Action, err)
+		return nil, err
 	}
-
-	// Set the rate limiting configuration based on the rule type
-	characteristics := rateLimit.Characteristics
-	if len(characteristics) == 0 {
-		characteristics = []string{"ip.src", "cf.colo.id"}
-	}
-
-	// Use provided mitigation timeout:
-	// - mitigation_timeout = 0: Throttle mode (block only excess requests)
-	// - mitigation_timeout > 0: Ban mode (block all requests for duration)
-	// Note: Only Enterprise customers can use throttle mode with block action
-	newRule, err = c.setRateLimitConfig(newRule, rulesets.BlockRuleRatelimitParam{
-		Characteristics:   cloudflare.F(characteristics),
-		Period:            cloudflare.F(int64(rateLimit.Period)),
-		RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
-		MitigationTimeout: cloudflare.F(int64(rateLimit.MitigationTimeout)),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to set rate limit config: %w", err)
-	}
-
-	newRuleParams := []rulesets.PhaseUpdateParamsRuleUnion{newRule}
-
-	// Add existing rules to preserve them (with their rate limiting configuration)
-	for _, rule := range currentRuleset.Rules {
-		// ALL rules in http_ratelimit phase MUST have ratelimit configuration
-		// Skip any rules that don't have ratelimit (they shouldn't exist, but safety check)
-		if rule.Ratelimit == nil {
-			continue // Skip rules without ratelimit configuration
-		}
-
-		// Use the correct parameter type for the action to preserve existing rules
-		ruleParam, err := c.createRuleParamForAction(string(rule.Action), rule.ID, rule.Description, rule.Expression, rule.Enabled)
-		if err != nil {
-			// Fallback to BlockRuleParam if we can't determine the correct type
-			ruleParam = rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rule.ID),
-				Action:      cloudflare.F(rulesets.BlockRuleActionBlock), // Use "block" as safe fallback
-				Description: cloudflare.F(rule.Description),
-				Expression:  cloudflare.F(rule.Expression),
-				Enabled:     cloudflare.F(rule.Enabled),
-			}
-		}
-
-		// CRITICAL: ALL rules in http_ratelimit phase MUST have ratelimit configuration
-		// Extract existing rate limit configuration and preserve it
-		rateLimitConfig := rulesets.BlockRuleRatelimitParam{
-			Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}),
-			Period:            cloudflare.F(int64(60)),
-			RequestsPerPeriod: cloudflare.F(int64(100)),
-			MitigationTimeout: cloudflare.F(int64(60)),
-		}
-
-		// Try to extract the existing rate limit configuration
-		if blockRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-			rateLimitConfig = rulesets.BlockRuleRatelimitParam{
-				Characteristics:   cloudflare.F(blockRateLimit.Characteristics),
-				Period:            cloudflare.F(blockRateLimit.Period),
-				RequestsPerPeriod: cloudflare.F(blockRateLimit.RequestsPerPeriod),
-				MitigationTimeout: cloudflare.F(blockRateLimit.MitigationTimeout),
-			}
-		}
-
-		// Set the rate limit configuration using the helper function
-		ruleParam, err = c.setRateLimitConfig(ruleParam, rateLimitConfig)
-		if err != nil {
-			// If we can't set the rate limit config, skip this rule to avoid API errors
-			continue
-		}
-
-		newRuleParams = append([]rulesets.PhaseUpdateParamsRuleUnion{ruleParam}, newRuleParams...)
-	}
-
-	// Update the ruleset with the new rule
-	updatedRuleset, err := c.client.Rulesets.Phases.Update(ctx, phase, rulesets.PhaseUpdateParams{
+	updatedRuleset, err := c.client.Rulesets.Rules.New(ctx, currentRuleset.ID, rulesets.RuleNewParams{
 		ZoneID: cloudflare.F(zoneID),
-		Rules:  cloudflare.F(newRuleParams),
+		Body:   body,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to update ruleset with new rate limit rule: %w", err)
+		return nil, fmt.Errorf("failed to create rate limit rule: %w", err)
 	}
-
-	// Find the newly created rule in the response
-	var createdRuleID string
-	if len(updatedRuleset.Rules) > 0 {
-		// The new rule should be the last one added
-		lastRule := updatedRuleset.Rules[len(updatedRuleset.Rules)-1]
-		createdRuleID = lastRule.ID
+	if len(updatedRuleset.Rules) == 0 || updatedRuleset.Rules[len(updatedRuleset.Rules)-1].ID == "" {
+		return nil, fmt.Errorf("created rate limit rule missing from Cloudflare response")
 	}
+	createdRuleID := updatedRuleset.Rules[len(updatedRuleset.Rules)-1].ID
 
 	return &RateLimit{
 		ID:          createdRuleID,
@@ -353,89 +321,13 @@ func (c *CloudflareClient) UpdateRateLimit(ctx context.Context, zoneID, rateLimi
 		return nil, fmt.Errorf("failed to get rate limit ruleset: %w", err)
 	}
 
-	// Build new rules list with updated rule
-	var newRuleParams []rulesets.PhaseUpdateParamsRuleUnion
-	var ruleFound bool
-
-	for _, rule := range currentRuleset.Rules {
-		if rule.ID == rateLimitID {
-			// Replace the rule with updated version using the provided action
-			// Use BlockRuleParam as the base type but change the action dynamically
-			characteristics := rateLimit.Characteristics
-			if len(characteristics) == 0 {
-				characteristics = []string{"ip.src", "cf.colo.id"}
-			}
-
-			// Use provided mitigation timeout:
-			// - mitigation_timeout = 0: Throttle mode (block only excess requests)
-			// - mitigation_timeout > 0: Ban mode (block all requests for duration)
-			newRuleParams = append(newRuleParams, rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rateLimitID),
-				Action:      cloudflare.F(rulesets.BlockRuleAction(rateLimit.Action)), // Use provided action (challenge, block, etc.)
-				Description: cloudflare.F(rateLimit.Description),
-				Expression:  cloudflare.F(rateLimit.Expression),
-				Enabled:     cloudflare.F(!rateLimit.Disabled), // CRITICAL: Enabled field is required
-				Ratelimit: cloudflare.F(rulesets.BlockRuleRatelimitParam{
-					Characteristics:   cloudflare.F(characteristics),
-					Period:            cloudflare.F(int64(rateLimit.Period)),
-					RequestsPerPeriod: cloudflare.F(int64(rateLimit.Threshold)),
-					MitigationTimeout: cloudflare.F(int64(rateLimit.MitigationTimeout)),
-				}),
-			})
-			ruleFound = true
-		} else {
-			// Keep existing rule (with its rate limiting configuration)
-			// ALL rules in http_ratelimit phase MUST have ratelimit configuration
-			if rule.Ratelimit == nil {
-				continue // Skip rules without ratelimit configuration (shouldn't exist)
-			}
-
-			// Use consistent rule structure regardless of action type
-			ruleParam := rulesets.BlockRuleParam{
-				ID:          cloudflare.F(rule.ID),
-				Action:      cloudflare.F(rulesets.BlockRuleAction(rule.Action)),
-				Description: cloudflare.F(rule.Description),
-				Expression:  cloudflare.F(rule.Expression),
-				Enabled:     cloudflare.F(rule.Enabled), // CRITICAL: Preserve the enabled state
-			}
-
-			// CRITICAL: ALL rules in http_ratelimit phase MUST have ratelimit configuration
-			rateLimitExtracted := false
-
-			// Try BlockRuleRatelimit (for block/challenge actions)
-			if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-				ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-					Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-					Period:            cloudflare.F(existingRateLimit.Period),
-					RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-					MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-				})
-				rateLimitExtracted = true
-			}
-
-			// If we couldn't extract the ratelimit config, use safe defaults
-			if !rateLimitExtracted {
-				// Use default ratelimit configuration to ensure the rule is valid
-				ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-					Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}),
-					Period:            cloudflare.F(int64(60)),
-					RequestsPerPeriod: cloudflare.F(int64(100)),
-					MitigationTimeout: cloudflare.F(int64(60)),
-				})
-			}
-
-			newRuleParams = append(newRuleParams, ruleParam)
-		}
+	body, err := editRateLimitRuleBody(rateLimit)
+	if err != nil {
+		return nil, err
 	}
-
-	if !ruleFound {
-		return nil, fmt.Errorf("rate limit rule with ID %s not found", rateLimitID)
-	}
-
-	// Update the ruleset
-	_, err = c.client.Rulesets.Phases.Update(ctx, phase, rulesets.PhaseUpdateParams{
+	_, err = c.client.Rulesets.Rules.Edit(ctx, currentRuleset.ID, rateLimitID, rulesets.RuleEditParams{
 		ZoneID: cloudflare.F(zoneID),
-		Rules:  cloudflare.F(newRuleParams),
+		Body:   body,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to update rate limit rule: %w", err)
@@ -475,68 +367,8 @@ func (c *CloudflareClient) DeleteRateLimit(ctx context.Context, zoneID, rateLimi
 		return fmt.Errorf("failed to get rate limit ruleset: %w", err)
 	}
 
-	// Build new rules list without the rule to delete
-	var newRuleParams []rulesets.PhaseUpdateParamsRuleUnion
-	var ruleFound bool
-
-	for _, rule := range currentRuleset.Rules {
-		if rule.ID == rateLimitID {
-			// Skip this rule (delete it)
-			ruleFound = true
-			continue
-		}
-
-		// Keep existing rule (with its rate limiting configuration)
-		// ALL rules in http_ratelimit phase MUST have ratelimit configuration
-		if rule.Ratelimit == nil {
-			continue // Skip rules without ratelimit configuration (shouldn't exist)
-		}
-
-		// Use consistent rule structure regardless of action type
-		ruleParam := rulesets.BlockRuleParam{
-			ID:          cloudflare.F(rule.ID),
-			Action:      cloudflare.F(rulesets.BlockRuleAction(rule.Action)),
-			Description: cloudflare.F(rule.Description),
-			Expression:  cloudflare.F(rule.Expression),
-			Enabled:     cloudflare.F(rule.Enabled), // CRITICAL: Preserve the enabled state
-		}
-
-		// CRITICAL: ALL rules in http_ratelimit phase MUST have ratelimit configuration
-		rateLimitExtracted := false
-
-		// Try BlockRuleRatelimit (for block/challenge actions)
-		if existingRateLimit, ok := rule.Ratelimit.(rulesets.BlockRuleRatelimit); ok {
-			ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-				Characteristics:   cloudflare.F(existingRateLimit.Characteristics),
-				Period:            cloudflare.F(existingRateLimit.Period),
-				RequestsPerPeriod: cloudflare.F(existingRateLimit.RequestsPerPeriod),
-				MitigationTimeout: cloudflare.F(existingRateLimit.MitigationTimeout),
-			})
-			rateLimitExtracted = true
-		}
-
-		// If we couldn't extract the ratelimit config, use safe defaults
-		if !rateLimitExtracted {
-			// Use default ratelimit configuration to ensure the rule is valid
-			ruleParam.Ratelimit = cloudflare.F(rulesets.BlockRuleRatelimitParam{
-				Characteristics:   cloudflare.F([]string{"ip.src", "cf.colo.id"}),
-				Period:            cloudflare.F(int64(60)),
-				RequestsPerPeriod: cloudflare.F(int64(100)),
-				MitigationTimeout: cloudflare.F(int64(60)),
-			})
-		}
-
-		newRuleParams = append(newRuleParams, ruleParam)
-	}
-
-	if !ruleFound {
-		return fmt.Errorf("rate limit rule with ID %s not found", rateLimitID)
-	}
-
-	// Update the ruleset without the deleted rule
-	_, err = c.client.Rulesets.Phases.Update(ctx, phase, rulesets.PhaseUpdateParams{
+	_, err = c.client.Rulesets.Rules.Delete(ctx, currentRuleset.ID, rateLimitID, rulesets.RuleDeleteParams{
 		ZoneID: cloudflare.F(zoneID),
-		Rules:  cloudflare.F(newRuleParams),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to delete rate limit rule: %w", err)
@@ -1189,16 +1021,8 @@ func applyFirewallRuleResponse(param rulesets.PhaseUpdateParamsRuleUnion, respon
 
 // createRuleParamForAction creates the appropriate rule parameter type based on the action
 func (c *CloudflareClient) createRuleParamForAction(action, id, description, expression string, enabled bool) (rulesets.PhaseUpdateParamsRuleUnion, error) {
-	// Validate action type before processing
-	validActions := map[string]bool{
-		"log":               true,
-		"block":             true,
-		"challenge":         true,
-		"js_challenge":      true,
-		"managed_challenge": true,
-	}
-	if !validActions[action] {
-		return nil, fmt.Errorf("unsupported action type: %s (valid: log, block, challenge, js_challenge, managed_challenge)", action)
+	if err := validateRuleAction(action); err != nil {
+		return nil, err
 	}
 
 	switch action {
@@ -1237,24 +1061,5 @@ func (c *CloudflareClient) createRuleParamForAction(action, id, description, exp
 		return param, nil
 	default:
 		return nil, fmt.Errorf("unsupported action type: %s", action)
-	}
-}
-
-// setRateLimitConfig sets the rate limiting configuration on a rule parameter and returns the updated rule
-func (c *CloudflareClient) setRateLimitConfig(ruleParam rulesets.PhaseUpdateParamsRuleUnion, rateLimitConfig rulesets.BlockRuleRatelimitParam) (rulesets.PhaseUpdateParamsRuleUnion, error) {
-	switch rule := ruleParam.(type) {
-	case rulesets.LogRuleParam:
-		rule.Ratelimit = cloudflare.F(rulesets.LogRuleRatelimitParam{
-			Characteristics:   rateLimitConfig.Characteristics,
-			Period:            rateLimitConfig.Period,
-			RequestsPerPeriod: rateLimitConfig.RequestsPerPeriod,
-			MitigationTimeout: rateLimitConfig.MitigationTimeout,
-		})
-		return rule, nil
-	case rulesets.BlockRuleParam:
-		rule.Ratelimit = cloudflare.F(rateLimitConfig)
-		return rule, nil
-	default:
-		return nil, fmt.Errorf("unsupported rule parameter type: %T", ruleParam)
 	}
 }

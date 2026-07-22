@@ -49,7 +49,10 @@ func TestRateLimitMutationsUseSingleRuleEndpoints(t *testing.T) {
 			method: http.MethodPatch,
 			path:   "/zones/zone-1/rulesets/ruleset-1/rules/target-rule",
 			call: func(client *CloudflareClient) error {
-				_, err := client.UpdateRateLimit(context.Background(), "zone-1", "target-rule", rateLimit)
+				updated, err := client.UpdateRateLimit(context.Background(), "zone-1", "target-rule", rateLimit)
+				if err == nil && updated.ID != "target-rule" {
+					return fmt.Errorf("updated ID = %q, want target-rule", updated.ID)
+				}
 				return err
 			},
 		},
@@ -89,8 +92,11 @@ func TestRateLimitMutationsUseSingleRuleEndpoints(t *testing.T) {
 				}
 
 				rules := []map[string]any{rateLimitRule("sibling-log", 4900)}
-				if test.method == http.MethodPost {
+				switch test.method {
+				case http.MethodPost:
 					rules = append(rules, rateLimitRule("new-rule", rateLimit.Threshold))
+				case http.MethodPatch:
+					rules = append(rules, rateLimitRule("target-rule", rateLimit.Threshold))
 				}
 				writeRulesetResponse(t, w, rules)
 			}))
@@ -117,6 +123,9 @@ func assertRateLimitBody(t *testing.T, body map[string]any, expected RateLimit) 
 	t.Helper()
 	if _, ok := body["rules"]; ok {
 		t.Fatal("single-rule mutation unexpectedly contains a rules list")
+	}
+	if _, ok := body["id"]; ok {
+		t.Fatal("single-rule mutation must identify the existing rule only through the request path")
 	}
 	encoded, _ := json.Marshal(body)
 	if strings.Contains(string(encoded), "sibling-log") {

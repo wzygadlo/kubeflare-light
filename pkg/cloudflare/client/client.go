@@ -954,23 +954,18 @@ func (c *CloudflareClient) preserveExistingRule(existingRule rulesets.PhaseGetRe
 		return nil, fmt.Errorf("cannot preserve unsupported firewall rule action %q for rule %s", existingRule.Action, existingRule.ID)
 	}
 
-	logging := cloudflare.F(rulesets.LoggingParam{Enabled: cloudflare.F(existingRule.Logging.Enabled)})
-
 	switch p := param.(type) {
 	case rulesets.BlockRuleParam:
-		p.Logging = logging
 		if existingRule.Ref != "" {
 			p.Ref = cloudflare.F(existingRule.Ref)
 		}
 		param = p
 	case rulesets.LogRuleParam:
-		p.Logging = logging
 		if existingRule.Ref != "" {
 			p.Ref = cloudflare.F(existingRule.Ref)
 		}
 		param = p
 	case rulesets.ManagedChallengeRuleParam:
-		p.Logging = logging
 		if existingRule.Ref != "" {
 			p.Ref = cloudflare.F(existingRule.Ref)
 		}

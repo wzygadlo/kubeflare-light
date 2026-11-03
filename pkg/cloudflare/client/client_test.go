@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -195,6 +196,77 @@ func TestDeleteFirewallRuleUsesSingleRuleEndpoint(t *testing.T) {
 				t.Fatalf("requests = %d, want %d", requests, wantRequests)
 			}
 		})
+	}
+}
+
+func TestUpdateFirewallRulePreservesSkipOnlyLogging(t *testing.T) {
+	rules := []map[string]any{}
+	for i, action := range []string{"skip", "skip", "block", "log", "managed_challenge", "challenge", "js_challenge"} {
+		rule := map[string]any{
+			"id": fmt.Sprintf("sibling-%d", i), "action": action,
+			"description": action, "expression": "true", "enabled": true,
+			"ref": fmt.Sprintf("ref-%d", i),
+		}
+		if action == "skip" {
+			rule["logging"] = map[string]any{"enabled": i == 0}
+			rule["action_parameters"] = map[string]any{"ruleset": "current"}
+		}
+		rules = append(rules, rule)
+	}
+	rules = append(rules, map[string]any{
+		"id": "target-rule", "action": "block", "description": "target",
+		"expression": "true", "enabled": true,
+	})
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/zones/zone-1/rulesets/phases/http_request_firewall_custom/entrypoint" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			writeRulesetResponse(t, w, rules)
+		case http.MethodPut:
+			var body struct {
+				Rules []map[string]any `json:"rules"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			rules[len(rules)-1]["expression"] = `http.host ne "vidiq.com"`
+			if !reflect.DeepEqual(body.Rules, rules) {
+				t.Errorf("rules = %#v, want %#v", body.Rules, rules)
+			}
+			writeRulesetResponse(t, w, body.Rules)
+		default:
+			t.Errorf("unexpected method: %s", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	client := &CloudflareClient{
+		client: cloudflare.NewClient(
+			option.WithAPIToken("test-token"),
+			option.WithBaseURL(server.URL),
+		),
+		rateLimiter: rate.NewLimiter(rate.Inf, 1),
+	}
+	updated, err := client.UpdateFirewallRule(context.Background(), "zone-1", "target-rule", FirewallRule{
+		Action: "block", Description: "target", Expression: `http.host ne "vidiq.com"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != "target-rule" || updated.Expression != `http.host ne "vidiq.com"` {
+		t.Fatalf("updated rule = %#v", updated)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want phase lookup plus one mutation", requests)
 	}
 }
 

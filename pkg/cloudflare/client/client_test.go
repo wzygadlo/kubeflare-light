@@ -119,6 +119,85 @@ func TestRateLimitMutationsUseSingleRuleEndpoints(t *testing.T) {
 	}
 }
 
+func TestDeleteFirewallRuleUsesSingleRuleEndpoint(t *testing.T) {
+	tests := []struct {
+		name         string
+		lookupStatus int
+		deleteStatus int
+		targetExists bool
+		wantError    bool
+	}{
+		{"preserves unsupported sibling", http.StatusOK, http.StatusOK, true, false},
+		{"already absent rule", http.StatusOK, 0, false, false},
+		{"rule disappears after lookup", http.StatusOK, http.StatusNotFound, true, false},
+		{"already absent ruleset", http.StatusNotFound, 0, false, false},
+		{"lookup forbidden", http.StatusForbidden, 0, false, true},
+		{"delete forbidden", http.StatusOK, http.StatusForbidden, true, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sibling := map[string]any{
+				"id": "sibling-execute", "action": "execute", "expression": "true", "enabled": true,
+				"action_parameters": map[string]any{"id": "custom-ruleset"},
+			}
+			rules := []map[string]any{sibling}
+			if test.targetExists {
+				rules = append(rules, map[string]any{
+					"id": "target-rule", "action": "block", "expression": "true", "enabled": true,
+				})
+			}
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.Header().Set("Content-Type", "application/json")
+				status := test.lookupStatus
+				if requests == 1 {
+					if r.Method != http.MethodGet || r.URL.Path != "/zones/zone-1/rulesets/phases/http_request_firewall_custom/entrypoint" {
+						t.Errorf("unexpected phase lookup: %s %s", r.Method, r.URL.Path)
+					}
+					if status == http.StatusOK {
+						writeRulesetResponse(t, w, rules)
+						return
+					}
+				} else {
+					if r.Method != http.MethodDelete || r.URL.Path != "/zones/zone-1/rulesets/ruleset-1/rules/target-rule" {
+						t.Errorf("unexpected mutation: %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					status = test.deleteStatus
+				}
+				if status == http.StatusOK {
+					writeRulesetResponse(t, w, []map[string]any{sibling})
+					return
+				}
+				w.WriteHeader(status)
+				fmt.Fprint(w, `{"success":false,"errors":[{"code":1000,"message":"request failed"}]}`)
+			}))
+			defer server.Close()
+
+			client := &CloudflareClient{
+				client: cloudflare.NewClient(
+					option.WithAPIToken("test-token"),
+					option.WithBaseURL(server.URL),
+				),
+				rateLimiter: rate.NewLimiter(rate.Inf, 1),
+			}
+			err := client.DeleteFirewallRule(context.Background(), "zone-1", "target-rule")
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError = %v", err, test.wantError)
+			}
+			wantRequests := 2
+			if test.lookupStatus != http.StatusOK || !test.targetExists {
+				wantRequests = 1
+			}
+			if requests != wantRequests {
+				t.Fatalf("requests = %d, want %d", requests, wantRequests)
+			}
+		})
+	}
+}
+
 func assertRateLimitBody(t *testing.T, body map[string]any, expected RateLimit) {
 	t.Helper()
 	if _, ok := body["rules"]; ok {

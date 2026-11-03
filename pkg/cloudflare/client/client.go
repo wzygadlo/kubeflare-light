@@ -3,7 +3,9 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"time"
 
@@ -775,43 +777,32 @@ func (c *CloudflareClient) DeleteFirewallRule(ctx context.Context, zoneID, ruleI
 		ZoneID: cloudflare.F(zoneID),
 	})
 	if err != nil {
+		var apiErr *cloudflare.Error
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil
+		}
 		return fmt.Errorf("failed to get firewall custom ruleset: %w", err)
 	}
 
-	// Build new rules list without the rule to delete
-	var remainingRules []rulesets.PhaseUpdateParamsRuleUnion
-	var targetRuleFound bool
-
+	targetRuleFound := false
 	for _, existingRule := range currentRuleset.Rules {
 		if existingRule.ID == ruleID {
-			// Skip this rule (delete it)
 			targetRuleFound = true
-			continue
+			break
 		}
-
-		// Preserve all other existing rules. Unlike Create/UpdateFirewallRule, a rule we
-		// can't round-trip must not block deletion of our own resource: log and drop it
-		// (matching the historical behavior) instead of failing the whole operation, so the
-		// WAFRule finalizer always completes.
-		ruleParam, err := c.preserveExistingRule(existingRule)
-		if err != nil {
-			fmt.Printf("WARNING: dropping firewall rule %s (action %q) while deleting rule %s: %v\n", existingRule.ID, existingRule.Action, ruleID, err)
-			continue
-		}
-
-		remainingRules = append(remainingRules, ruleParam)
 	}
-
 	if !targetRuleFound {
-		return fmt.Errorf("firewall rule with ID %s not found", ruleID)
+		return nil
 	}
 
-	// Update the ruleset without the deleted rule
-	_, err = c.client.Rulesets.Phases.Update(ctx, phase, rulesets.PhaseUpdateParams{
+	_, err = c.client.Rulesets.Rules.Delete(ctx, currentRuleset.ID, ruleID, rulesets.RuleDeleteParams{
 		ZoneID: cloudflare.F(zoneID),
-		Rules:  cloudflare.F(remainingRules),
 	})
 	if err != nil {
+		var apiErr *cloudflare.Error
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil
+		}
 		return fmt.Errorf("failed to delete firewall rule: %w", err)
 	}
 
